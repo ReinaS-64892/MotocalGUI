@@ -1,10 +1,6 @@
-//! Sampled calibration using Wahba's rotation solver.
-
 use nalgebra::{Matrix3, Rotation3, RowVector3, Vector3};
 use crate::calibration::transform::{TransformD, average_quaternions};
 use crate::error::CalibrationError;
-
-// --- Types ---
 
 #[derive(Debug, Clone)]
 pub struct PoseSample {
@@ -15,17 +11,12 @@ pub struct PoseSample {
 }
 
 impl PoseSample {
-    pub fn from_xr_poses(
-        source_pos: [f32; 3],
-        source_ori: [f32; 4],
-        target_pos: [f32; 3],
-        target_ori: [f32; 4],
-    ) -> Self {
+    pub fn from_transforms(source: &TransformD, target: &TransformD) -> Self {
         Self {
-            source_position: to_vec3(source_pos),
-            source_orientation: to_quat(source_ori),
-            target_position: to_vec3(target_pos),
-            target_orientation: to_quat(target_ori),
+            source_position: source.origin,
+            source_orientation: source.rotation_quaternion(),
+            target_position: target.origin,
+            target_orientation: target.rotation_quaternion(),
         }
     }
 
@@ -49,16 +40,6 @@ impl PoseSample {
     }
 }
 
-fn to_vec3(v: [f32; 3]) -> Vector3<f64> {
-    Vector3::new(v[0] as f64, v[1] as f64, v[2] as f64)
-}
-
-fn to_quat(q: [f32; 4]) -> nalgebra::UnitQuaternion<f64> {
-    nalgebra::UnitQuaternion::from_quaternion(
-        nalgebra::Quaternion::new(q[3] as f64, q[0] as f64, q[1] as f64, q[2] as f64),
-    )
-}
-
 #[derive(Clone)]
 struct Poses {
     source: TransformD,
@@ -73,8 +54,6 @@ impl Poses {
         }
     }
 }
-
-// --- Public API ---
 
 pub struct SampleCollector {
     samples: Vec<PoseSample>,
@@ -100,12 +79,13 @@ impl SampleCollector {
         self.samples.push(sample);
     }
 
-    pub fn sample_count(&self) -> u32 { self.samples.len() as u32 }
-    pub fn is_complete(&self) -> bool { self.samples.len() >= self.target_count as usize }
-    pub fn progress(&self) -> (u32, u32) { (self.sample_count(), self.target_count) }
+    pub const fn sample_count(&self) -> u32 { self.samples.len() as u32 }
+    pub const fn is_complete(&self) -> bool { self.samples.len() >= self.target_count as usize }
+    pub const fn progress(&self) -> (u32, u32) { (self.sample_count(), self.target_count) }
 
-    /// Returns (offset, median_error_degrees, axis_diversity).
-    pub fn compute_calibration(&self) -> Result<(TransformD, f32, f32), CalibrationError> {
+    // Returns (offset, `median_error_degrees`, `axis_diversity`).
+    // Needs >=3 samples of varied motion; a degenerate (collinear) set fails the solve.
+    pub fn compute_calibration(&self) -> Result<(TransformD, f64, f64), CalibrationError> {
         if self.samples.len() < 3 {
             return Err(CalibrationError::InsufficientSamples {
                 required: 3,
@@ -123,18 +103,19 @@ impl SampleCollector {
         Ok((
             TransformD { basis: rotation, origin: translation },
             median_error,
-            axis_diversity as f32,
+            axis_diversity,
         ))
     }
 }
 
 // --- Rotation: Wahba on rotation-axis correspondences ---
 
-/// Wahba's SVD on rotation-axis pairs (no centroiding).
+// Wahba's SVD on rotation-axis pairs (no centroiding).
 const MIN_ROTATION_RAD: f64 = 0.4; // ~23°, reject noise from small movements
 const MIN_AXIS_NORM: f64 = 0.01; // reject degenerate near-180° rotations
 const QUAT_NORM_TOLERANCE: f64 = 1e-6;
 
+#[allow(clippy::many_single_char_names)]
 fn solve_rotation(poses: &[Poses]) -> Result<(Rotation3<f64>, f64), CalibrationError> {
     let n = poses.len();
     let mut h = Matrix3::<f64>::zeros();
@@ -216,19 +197,19 @@ fn solve_translation(
             let diff_j = sj.source.origin - pj;
 
             // Source-frame equations
-            let is_i = si.source.basis.transpose();
-            let is_j = sj.source.basis.transpose();
-            let a: Matrix3<f64> = is_j.matrix() - is_i.matrix();
-            let b = is_j * diff_j - is_i * diff_i;
+            let inv_src_i = si.source.basis.transpose();
+            let inv_src_j = sj.source.basis.transpose();
+            let a: Matrix3<f64> = inv_src_j.matrix() - inv_src_i.matrix();
+            let b = inv_src_j * diff_j - inv_src_i * diff_i;
             ata += a.transpose() * a;
             atb += a.transpose() * b;
             n += 3;
 
             // Target-frame equations
-            let it_i = ri.transpose();
-            let it_j = rj.transpose();
-            let a: Matrix3<f64> = it_j.matrix() - it_i.matrix();
-            let b = it_j * diff_j - it_i * diff_i;
+            let inv_tgt_i = ri.transpose();
+            let inv_tgt_j = rj.transpose();
+            let a: Matrix3<f64> = inv_tgt_j.matrix() - inv_tgt_i.matrix();
+            let b = inv_tgt_j * diff_j - inv_tgt_i * diff_i;
             ata += a.transpose() * a;
             atb += a.transpose() * b;
             n += 3;
@@ -246,7 +227,7 @@ fn solve_translation(
 
 // --- Quality metric ---
 
-fn grip_consistency(samples: &[PoseSample], rotation: &Rotation3<f64>) -> f32 {
+fn grip_consistency(samples: &[PoseSample], rotation: &Rotation3<f64>) -> f64 {
     let q = nalgebra::UnitQuaternion::from_rotation_matrix(rotation);
     let offsets: Vec<_> = samples.iter()
         .map(|s| s.source_orientation.inverse() * q * s.target_orientation)
@@ -257,7 +238,7 @@ fn grip_consistency(samples: &[PoseSample], rotation: &Rotation3<f64>) -> f32 {
         .map(|o| reference.rotation_to(o).angle().to_degrees())
         .collect();
     errors.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    errors[errors.len() / 2] as f32
+    errors[errors.len() / 2]
 }
 
 // --- Tests ---
@@ -278,8 +259,8 @@ mod tests {
     fn test_identity_calibration() {
         let mut c = SampleCollector::new(10);
         for i in 0..10 {
-            let r = nalgebra::UnitQuaternion::from_euler_angles(i as f64 * 0.5, 0.0, 0.0);
-            let p = Vector3::new(i as f64 * 0.1, 0.0, 0.0);
+            let r = nalgebra::UnitQuaternion::from_euler_angles(f64::from(i) * 0.5, 0.0, 0.0);
+            let p = Vector3::new(f64::from(i) * 0.1, 0.0, 0.0);
             c.add_sample_unchecked(sample(p, r, p, r));
         }
         let (result, _, _) = c.compute_calibration().unwrap();
@@ -293,7 +274,7 @@ mod tests {
         let offset_r = Rotation3::from(offset);
 
         for i in 0..20 {
-            let t = i as f64 * 0.2;
+            let t = f64::from(i) * 0.2;
             let sr = nalgebra::UnitQuaternion::from_euler_angles(t.sin()*0.5, t.cos()*0.3, t*0.2);
             let sp = Vector3::new(t.cos()*0.5, t.sin()*0.3, t*0.1);
             c.add_sample_unchecked(sample(sp, sr, offset_r.inverse()*sp, offset.inverse()*sr));
@@ -302,7 +283,7 @@ mod tests {
         let dot = offset.quaternion().dot(
             nalgebra::UnitQuaternion::from_rotation_matrix(&result.basis).quaternion()
         ).abs();
-        assert!(dot > 0.99, "dot: {}", dot);
+        assert!(dot > 0.99, "dot: {dot}");
         assert!(result.origin.norm() < 0.1);
     }
 
@@ -314,7 +295,7 @@ mod tests {
         let offset_t = Vector3::new(1.0, -0.5, 2.0);
 
         for i in 0..30 {
-            let t = i as f64 * 0.15;
+            let t = f64::from(i) * 0.15;
             let sr = nalgebra::UnitQuaternion::from_euler_angles(t.sin()*0.6, t.cos()*0.4, (t*1.5).sin()*0.3);
             let sp = Vector3::new(t.cos()*0.8, t.sin()*0.6+1.5, (t*0.5).cos()*0.4);
             let tr = offset_r.inverse() * sr;
@@ -325,7 +306,7 @@ mod tests {
         let dot = offset_r.quaternion().dot(
             nalgebra::UnitQuaternion::from_rotation_matrix(&result.basis).quaternion()
         ).abs();
-        assert!(dot > 0.95, "dot: {}", dot);
+        assert!(dot > 0.95, "dot: {dot}");
         assert!((result.origin - offset_t).norm() < 0.5);
     }
 
@@ -333,7 +314,7 @@ mod tests {
     fn test_insufficient_samples() {
         let mut c = SampleCollector::new(10);
         for i in 0..2 {
-            let p = Vector3::new(i as f64, 0.0, 0.0);
+            let p = Vector3::new(f64::from(i), 0.0, 0.0);
             c.add_sample_unchecked(sample(p, nalgebra::UnitQuaternion::identity(), p, nalgebra::UnitQuaternion::identity()));
         }
         assert!(matches!(c.compute_calibration(), Err(CalibrationError::InsufficientSamples { .. })));
@@ -352,18 +333,11 @@ mod tests {
     }
 
     #[test]
-    fn test_from_xr_poses() {
-        let s = PoseSample::from_xr_poses([1.0, 2.0, 3.0], [0.0, 0.0, 0.0, 1.0], [4.0, 5.0, 6.0], [0.0, 0.0, 0.0, 1.0]);
-        assert!((s.source_position.x - 1.0).abs() < 1e-6);
-        assert!((s.target_position.x - 4.0).abs() < 1e-6);
-    }
-
-    #[test]
     fn test_progress_tracking() {
         let mut c = SampleCollector::new(5);
         assert_eq!(c.progress(), (0, 5));
         for i in 0..5 {
-            let p = Vector3::new(i as f64, 0.0, 0.0);
+            let p = Vector3::new(f64::from(i), 0.0, 0.0);
             c.add_sample_unchecked(sample(p, nalgebra::UnitQuaternion::identity(), p, nalgebra::UnitQuaternion::identity()));
         }
         assert_eq!(c.progress(), (5, 5));

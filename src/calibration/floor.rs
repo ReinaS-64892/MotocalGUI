@@ -11,7 +11,7 @@ pub struct FloorCalibrator {
 }
 
 impl FloorCalibrator {
-    pub fn with_default_config() -> Self {
+    pub const fn with_default_config() -> Self {
         Self {
             sample_count: DEFAULT_SAMPLE_COUNT,
             max_variance: DEFAULT_MAX_VARIANCE,
@@ -25,11 +25,12 @@ impl FloorCalibrator {
         self.is_active = true;
     }
 
-    pub fn is_active(&self) -> bool {
+    pub const fn is_active(&self) -> bool {
         self.is_active
     }
 
-    /// Returns Ok(Some(adjustment)) when enough samples are collected.
+    // Returns `Ok(Some(adjustment))` when enough samples are collected.
+    // Rejects the result if the floor samples are too inconsistent to trust (high variance).
     pub fn add_sample(&mut self, height: f32) -> Result<Option<f32>, CalibrationError> {
         if !self.is_active {
             return Ok(None);
@@ -46,7 +47,7 @@ impl FloorCalibrator {
     }
 
     pub fn progress(&self) -> (u32, u32) {
-        (self.samples.len() as u32, self.sample_count)
+        (self.samples.len().try_into().unwrap_or(u32::MAX), self.sample_count)
     }
 
     fn compute_adjustment(&self) -> Result<f32, CalibrationError> {
@@ -61,14 +62,15 @@ impl FloorCalibrator {
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let median = if sorted.len().is_multiple_of(2) {
-            (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2.0
+            f32::midpoint(sorted[sorted.len() / 2 - 1], sorted[sorted.len() / 2])
         } else {
             sorted[sorted.len() / 2]
         };
 
+        let n = self.samples.len() as f32;
         let variance: f32 = self.samples.iter()
             .map(|s| (s - median).powi(2))
-            .sum::<f32>() / self.samples.len() as f32;
+            .sum::<f32>() / n;
 
         if variance.sqrt() > self.max_variance {
             return Err(CalibrationError::HighVariance {

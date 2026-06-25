@@ -1,6 +1,5 @@
 use nalgebra::{Rotation3, UnitQuaternion, Vector3};
 
-/// Double-precision 3D rigid transform (rotation + translation).
 #[derive(Debug, Clone)]
 pub struct TransformD {
     pub basis: Rotation3<f64>,
@@ -22,14 +21,21 @@ impl TransformD {
         }
     }
 
-    /// Convert from OpenXR pose (f32 → f64). Quaternion order: [x, y, z, w].
-    pub fn from_xr_pose(position: [f32; 3], orientation: [f32; 4]) -> Self {
-        let pos = Vector3::new(position[0] as f64, position[1] as f64, position[2] as f64);
+    pub fn from_position_orientation_f64(position: [f64; 3], orientation: [f64; 4]) -> Self {
+        let pos = Vector3::new(position[0], position[1], position[2]);
         let quat = UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(
-            orientation[3] as f64,
-            orientation[0] as f64,
-            orientation[1] as f64,
-            orientation[2] as f64,
+            orientation[3], orientation[0], orientation[1], orientation[2],
+        ));
+        Self::from_position_orientation(pos, quat)
+    }
+
+    pub fn from_xr_pose(position: [f32; 3], orientation: [f32; 4]) -> Self {
+        let pos = Vector3::new(f64::from(position[0]), f64::from(position[1]), f64::from(position[2]));
+        let quat = UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(
+            f64::from(orientation[3]),
+            f64::from(orientation[0]),
+            f64::from(orientation[1]),
+            f64::from(orientation[2]),
         ));
         Self::from_position_orientation(pos, quat)
     }
@@ -61,21 +67,10 @@ impl TransformD {
         Self::from_position_orientation(pos, quat)
     }
 
-    pub fn position_f32(&self) -> [f32; 3] {
-        [self.origin.x as f32, self.origin.y as f32, self.origin.z as f32]
-    }
-
-    /// Quaternion as [x, y, z, w] f32 for OpenXR.
-    pub fn orientation_f32(&self) -> [f32; 4] {
-        let quat = UnitQuaternion::from_rotation_matrix(&self.basis);
-        [quat.i as f32, quat.j as f32, quat.k as f32, quat.w as f32]
-    }
-
     pub fn position_f64(&self) -> [f64; 3] {
         [self.origin.x, self.origin.y, self.origin.z]
     }
 
-    /// Quaternion as [x, y, z, w] f64 for libmonado.
     pub fn orientation_f64(&self) -> [f64; 4] {
         let quat = UnitQuaternion::from_rotation_matrix(&self.basis);
         [quat.i, quat.j, quat.k, quat.w]
@@ -92,7 +87,6 @@ impl TransformD {
         UnitQuaternion::from_rotation_matrix(&self.basis)
     }
 
-    /// Compares transforms allowing for quaternion double-cover (q and -q are the same rotation).
     pub fn approx_eq(&self, other: &Self, epsilon: f64) -> bool {
         let pos_diff = (self.origin - other.origin).norm();
         if pos_diff > epsilon {
@@ -109,11 +103,7 @@ impl TransformD {
         self.basis.euler_angles()
     }
 
-    pub fn rotation_angle(&self) -> f64 {
-        self.rotation_quaternion().angle()
-    }
-
-    /// Mean position + quaternion-averaged rotation.
+    // Mean position + quaternion-averaged rotation.
     pub fn average<I>(transforms: I) -> Option<Self>
     where
         I: IntoIterator<Item = Self>,
@@ -148,7 +138,7 @@ impl Default for TransformD {
 impl std::ops::Mul for TransformD {
     type Output = Self;
     fn mul(self, rhs: Self) -> Self::Output {
-        TransformD::mul(&self, &rhs)
+        Self::mul(&self, &rhs)
     }
 }
 
@@ -159,7 +149,7 @@ impl std::ops::Mul<&TransformD> for &TransformD {
     }
 }
 
-/// Iterative quaternion mean, handling the double-cover problem (q and -q are the same rotation).
+// Iterative quaternion mean, handling the double-cover problem (q and -q are the same rotation).
 pub fn average_quaternions(quaternions: &[UnitQuaternion<f64>]) -> Option<UnitQuaternion<f64>> {
     if quaternions.is_empty() {
         return None;
@@ -237,8 +227,9 @@ mod tests {
         let ori = [0.0f32, 0.0f32, 0.0f32, 1.0f32]; // Identity quaternion [x,y,z,w]
 
         let t = TransformD::from_xr_pose(pos, ori);
-        let back_pos = t.position_f32();
-        let back_ori = t.orientation_f32();
+        let back_pos = [t.origin.x as f32, t.origin.y as f32, t.origin.z as f32];
+        let quat = t.rotation_quaternion();
+        let back_ori = [quat.i as f32, quat.j as f32, quat.k as f32, quat.w as f32];
 
         assert!((back_pos[0] - pos[0]).abs() < 1e-6);
         assert!((back_pos[1] - pos[1]).abs() < 1e-6);

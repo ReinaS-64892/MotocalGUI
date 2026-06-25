@@ -65,12 +65,12 @@ pub enum ConfigError {
 
 impl From<std::io::Error> for ConfigError {
     fn from(e: std::io::Error) -> Self {
-        ConfigError::LoadFailed(e.to_string())
+        Self::LoadFailed(e.to_string())
     }
 }
 
 impl From<serde_json::Error> for ConfigError {
     fn from(e: serde_json::Error) -> Self {
-        ConfigError::InvalidFormat(e.to_string())
+        Self::InvalidFormat(e.to_string())
     }
 }

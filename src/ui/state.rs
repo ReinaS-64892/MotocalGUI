@@ -1,17 +1,13 @@
-//! Centralized application state.
-
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::Instant;
 
 use crate::calibration::DeviceMovement;
 use crate::config::Config;
 use crate::monado::{self, MonadoConnection};
 use crate::ui::device_selector::{Category, Device};
 
-type StateListener = Box<dyn Fn(&AppState)>;
-
-/// Battery snapshot for the status bar (e.g. "Tracker 790B7B56 85%").
 #[derive(Debug, Clone)]
 pub struct BatteryInfo {
     pub short_name: String,
@@ -19,13 +15,13 @@ pub struct BatteryInfo {
     pub charge: Option<f32>,
     pub charging: bool,
     pub online: bool,
+    offline_since: Option<Instant>,
 }
 
 
 fn shorten_device_name(name: &str) -> String {
     let lower = name.to_lowercase();
 
-    // Knuckles controllers
     if lower.contains("knuckles") || lower.contains("index") {
         if lower.contains("left") {
             return "Knuckles L".to_string();
@@ -35,7 +31,6 @@ fn shorten_device_name(name: &str) -> String {
         return "Knuckles".to_string();
     }
 
-    // Generic controllers
     if lower.contains("controller") {
         if lower.contains("left") {
             return "Controller L".to_string();
@@ -45,22 +40,18 @@ fn shorten_device_name(name: &str) -> String {
         return "Controller".to_string();
     }
 
-    // Trackers — just "Tracker" (serial suffix distinguishes them)
     if lower.contains("tracker") {
         return "Tracker".to_string();
     }
 
-    // HMDs
     if lower.contains("hmd") || lower.contains("headset") {
         return "HMD".to_string();
     }
 
-    // Gamepad
     if lower.contains("gamepad") {
         return "Gamepad".to_string();
     }
 
-    // Fallback: first two words
     let words: Vec<&str> = name.split_whitespace().collect();
     if words.len() <= 2 {
         name.to_string()
@@ -75,11 +66,10 @@ pub struct AppState {
     source_id: Option<String>,
     target_id: Option<String>,
     movement_intensities: HashMap<String, f32>,
-    /// Tracks battery devices across disconnects to show offline status.
+    // Tracks battery devices across disconnects
     known_battery_devices: HashMap<String, BatteryInfo>,
     hide_calibration_help: bool,
     sample_count: u32,
-    listeners: Vec<StateListener>,
 }
 
 impl AppState {
@@ -101,28 +91,21 @@ impl AppState {
             known_battery_devices: HashMap::new(),
             hide_calibration_help: config.hide_calibration_help,
             sample_count: config.sample_count,
-            listeners: Vec::new(),
         };
         state.update_known_battery_devices();
         state
     }
 
-    pub fn is_connected(&self) -> bool {
+    pub const fn is_connected(&self) -> bool {
         self.connection.is_some()
     }
 
-    pub fn connection(&self) -> Option<&MonadoConnection> {
+    pub const fn connection(&self) -> Option<&MonadoConnection> {
         self.connection.as_ref()
     }
 
     pub fn categories(&self) -> &[Category] {
         &self.categories
-    }
-
-    pub fn all_devices(&self) -> Vec<Device> {
-        self.categories.iter()
-            .flat_map(|c| c.devices.clone())
-            .collect()
     }
 
     pub fn source_devices(&self) -> Vec<Device> {
@@ -153,15 +136,19 @@ impl AppState {
             .collect()
     }
 
-    pub fn selected_source(&self) -> Option<Device> {
+    pub fn selected_source(&self) -> Option<&Device> {
         self.source_id.as_ref().and_then(|id| {
-            self.all_devices().into_iter().find(|d| d.unique_id() == id)
+            self.categories.iter()
+                .flat_map(|c| c.devices.iter())
+                .find(|d| d.unique_id() == id)
         })
     }
 
-    pub fn selected_target(&self) -> Option<Device> {
+    pub fn selected_target(&self) -> Option<&Device> {
         self.target_id.as_ref().and_then(|id| {
-            self.all_devices().into_iter().find(|d| d.unique_id() == id)
+            self.categories.iter()
+                .flat_map(|c| c.devices.iter())
+                .find(|d| d.unique_id() == id)
         })
     }
 
@@ -177,7 +164,6 @@ impl AppState {
         if self.source_id != id {
             self.source_id = id;
             self.save_config();
-            self.notify_listeners();
         }
     }
 
@@ -185,23 +171,18 @@ impl AppState {
         if self.target_id != id {
             self.target_id = id;
             self.save_config();
-            self.notify_listeners();
         }
     }
 
-    /// Only attempts when disconnected — avoids IPC churn. Returns true if state changed.
     pub fn refresh_connection(&mut self) -> bool {
         let was_connected = self.is_connected();
-
         if !was_connected {
-            // Only try to connect when not already connected
             self.connection = monado::try_connect();
         }
 
         let is_connected = self.is_connected();
-
         if is_connected && !was_connected {
-            // Just connected — do full enumeration using our stored connection
+            // Just connected
             if let Some(ref conn) = self.connection {
                 self.categories = conn.enumerate_devices().unwrap_or_default();
             }
@@ -210,11 +191,7 @@ impl AppState {
             self.categories.clear();
         }
 
-        let changed = was_connected != is_connected;
-        if changed {
-            self.notify_listeners();
-        }
-        changed
+        was_connected != is_connected
     }
 
     pub fn force_refresh(&mut self) {
@@ -225,14 +202,13 @@ impl AppState {
             self.categories.clear();
         }
         self.update_known_battery_devices();
-        self.notify_listeners();
     }
 
     pub fn refresh_batteries(&mut self) {
         if let Some(ref conn) = self.connection
             && conn.refresh_batteries(&mut self.categories).is_err()
         {
-            // Connection lost — clear it so next refresh_connection will reconnect
+            // Connection lost
             self.connection = None;
             self.categories.clear();
         }
@@ -240,42 +216,49 @@ impl AppState {
     }
 
     fn update_known_battery_devices(&mut self) {
-        // Collect current device IDs that have batteries
         let mut current_ids = std::collections::HashSet::new();
 
         for cat in &self.categories {
             for dev in &cat.devices {
-                if let Some(charge) = dev.battery_charge {
-                    let id = dev.unique_id().to_string();
-                    current_ids.insert(id.clone());
-                    let serial_suffix = if !dev.serial.is_empty() && dev.serial != dev.name {
-                        if dev.serial.len() > 8 {
-                            dev.serial[dev.serial.len() - 8..].to_string()
-                        } else {
-                            dev.serial.clone()
-                        }
+                let id = dev.unique_id().to_string();
+                current_ids.insert(id.clone());
+                let serial_suffix = if !dev.serial.is_empty() && dev.serial != dev.name {
+                    if dev.serial.len() > 8 {
+                        dev.serial[dev.serial.len() - 8..].to_string()
                     } else {
-                        String::new()
-                    };
-                    self.known_battery_devices.insert(id, BatteryInfo {
-                        short_name: shorten_device_name(&dev.name),
-                        serial_suffix,
-                        charge: Some(charge),
-                        charging: dev.battery_charging,
-                        online: true,
-                    });
-                }
+                        dev.serial.clone()
+                    }
+                } else {
+                    String::new()
+                };
+                self.known_battery_devices.insert(id, BatteryInfo {
+                    short_name: shorten_device_name(&dev.name),
+                    serial_suffix,
+                    charge: dev.battery_charge,
+                    charging: dev.battery_charging,
+                    online: true,
+                    offline_since: None,
+                });
             }
         }
 
-        // Mark previously known devices as offline if they disappeared
-        for (id, info) in self.known_battery_devices.iter_mut() {
+        let now = Instant::now();
+        for (id, info) in &mut self.known_battery_devices {
             if !current_ids.contains(id) {
+                if info.online {
+                    info.offline_since = Some(now);
+                }
                 info.online = false;
                 info.charge = None;
                 info.charging = false;
             }
         }
+        self.known_battery_devices.retain(|_, info| {
+            info.online
+                || info
+                    .offline_since
+                    .is_none_or(|t| now.duration_since(t).as_secs() < 300)
+        });
     }
 
     pub fn battery_status_list(&self) -> Vec<&BatteryInfo> {
@@ -289,14 +272,13 @@ impl AppState {
         for m in movements {
             self.movement_intensities.insert(m.device_id, m.intensity);
         }
-        self.notify_listeners();
     }
 
-    pub fn movement_intensities(&self) -> &HashMap<String, f32> {
+    pub const fn movement_intensities(&self) -> &HashMap<String, f32> {
         &self.movement_intensities
     }
 
-    pub fn hide_calibration_help(&self) -> bool {
+    pub const fn hide_calibration_help(&self) -> bool {
         self.hide_calibration_help
     }
 
@@ -307,7 +289,7 @@ impl AppState {
         }
     }
 
-    pub fn sample_count(&self) -> u32 {
+    pub const fn sample_count(&self) -> u32 {
         self.sample_count
     }
 
@@ -326,13 +308,7 @@ impl AppState {
             sample_count: self.sample_count,
         };
         if let Err(e) = config.save() {
-            eprintln!("Warning: Failed to save config: {}", e);
-        }
-    }
-
-    fn notify_listeners(&self) {
-        for listener in &self.listeners {
-            listener(self);
+            eprintln!("Warning: Failed to save config: {e}");
         }
     }
 }

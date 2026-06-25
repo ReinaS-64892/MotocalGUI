@@ -1,5 +1,3 @@
-//! Device selector with popover and live movement highlighting.
-
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -14,7 +12,13 @@ use gtk4::{
 use crate::ui::device_selector::Device;
 
 type SelectionCallback = Box<dyn Fn(Option<Device>)>;
-type PopoverCallback = Box<dyn Fn(bool)>; // true = opened, false = closed
+type PopoverCallback = Box<dyn Fn(PopoverState)>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PopoverState {
+    Opened,
+    Closed,
+}
 
 struct HighlightableRow {
     row: ListBoxRow,
@@ -40,13 +44,11 @@ impl DeviceList {
     pub fn new(label_text: &str) -> Rc<Self> {
         let container = GtkBox::new(Orientation::Vertical, 8);
 
-        // Header label
         let label = Label::new(Some(label_text));
         label.set_xalign(0.5);
         label.add_css_class("heading");
         container.append(&label);
 
-        // Selection button
         let button = Button::new();
         button.add_css_class("outlined");
 
@@ -62,13 +64,11 @@ impl DeviceList {
 
         container.append(&button);
 
-        // Create popover for device selection
         let popover = Popover::new();
         popover.set_parent(&button);
-        popover.set_has_arrow(false); // Cleaner look when matching button width
-        popover.set_autohide(true); // Click outside to close
+        popover.set_has_arrow(false);
+        popover.set_autohide(true);
 
-        // Scrolled list inside popover - height grows naturally, scrolls if needed
         let scrolled = ScrolledWindow::new();
         scrolled.set_policy(PolicyType::Never, PolicyType::Automatic);
         scrolled.set_propagate_natural_height(true);
@@ -99,7 +99,6 @@ impl DeviceList {
             on_popover_visibility: RefCell::new(None),
         });
 
-        // Connect button click to show popover
         let this_for_click = Rc::clone(&this);
         this.button.connect_clicked(move |btn| {
             // Match popover width to button width
@@ -110,22 +109,20 @@ impl DeviceList {
             this_for_click.popover.popup();
         });
 
-        // Connect popover visibility changes
         let this_for_show = Rc::clone(&this);
         this.popover.connect_show(move |_| {
             if let Some(ref cb) = *this_for_show.on_popover_visibility.borrow() {
-                cb(true);
+                cb(PopoverState::Opened);
             }
         });
 
         let this_for_closed = Rc::clone(&this);
         this.popover.connect_closed(move |_| {
             if let Some(ref cb) = *this_for_closed.on_popover_visibility.borrow() {
-                cb(false);
+                cb(PopoverState::Closed);
             }
         });
 
-        // Connect row activation
         let this_for_activate = Rc::clone(&this);
         this.list_box.connect_row_activated(move |_, row| {
             this_for_activate.handle_row_activation(row);
@@ -134,12 +131,19 @@ impl DeviceList {
         this
     }
 
-    pub fn widget(&self) -> &GtkBox {
+    pub const fn widget(&self) -> &GtkBox {
         &self.container
     }
 
     fn rebuild_list(self: &Rc<Self>) {
-        // Clear existing rows
+        let display = gdk::Display::default().expect("No display");
+        for highlightable in self.device_rows.borrow().values() {
+            gtk4::style_context_remove_provider_for_display(
+                &display,
+                &highlightable.css_provider,
+            );
+        }
+
         while let Some(row) = self.list_box.first_child() {
             self.list_box.remove(&row);
         }
@@ -149,17 +153,15 @@ impl DeviceList {
         let intensities = self.movement_intensities.borrow();
         let selected = self.selected_id.borrow().clone();
 
-        // Add "(None)" option (no highlighting needed, just the row)
-        let none_row = self.create_device_row(None, selected.is_none(), 0.0);
+        // Add "(None)" option
+        let none_row = Self::create_device_row(None, selected.is_none(), 0.0);
         self.list_box.append(&none_row.row);
 
-        // Group devices by category
         let mut current_category = String::new();
 
         for device in devices.iter() {
-            // Add category header if new
             if device.category != current_category {
-                current_category = device.category.clone();
+                current_category.clone_from(&device.category);
                 let cat_row = ListBoxRow::new();
                 cat_row.set_selectable(false);
                 cat_row.set_activatable(false);
@@ -178,7 +180,7 @@ impl DeviceList {
             let device_id = device.unique_id();
             let is_selected = selected.as_deref() == Some(device_id);
             let intensity = intensities.get(device_id).copied().unwrap_or(0.0);
-            let highlightable = self.create_device_row(Some(device), is_selected, intensity);
+            let highlightable = Self::create_device_row(Some(device), is_selected, intensity);
             self.list_box.append(&highlightable.row);
 
             // Store reference for live updates (keyed by unique_id)
@@ -198,14 +200,13 @@ impl DeviceList {
                 cb(None);
             }
         } else {
-            // Find the device (accounting for category headers)
             let devices = self.devices.borrow();
             let mut current_idx = 1; // Start after "(None)"
             let mut current_cat = String::new();
 
             for device in devices.iter() {
                 if device.category != current_cat {
-                    current_cat = device.category.clone();
+                    current_cat.clone_from(&device.category);
                     current_idx += 1; // Skip category header
                 }
 
@@ -228,7 +229,7 @@ impl DeviceList {
         self.popover.popdown();
     }
 
-    fn create_device_row(&self, device: Option<&Device>, is_selected: bool, intensity: f32) -> HighlightableRow {
+    fn create_device_row(device: Option<&Device>, is_selected: bool, intensity: f32) -> HighlightableRow {
         static ROW_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let row_id = ROW_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -236,7 +237,7 @@ impl DeviceList {
         row.set_selectable(false);
 
         // Unique CSS class for this row
-        let css_class = format!("device-row-{}", row_id);
+        let css_class = format!("device-row-{row_id}");
         row.add_css_class(&css_class);
 
         // Per-row CSS provider for smooth intensity updates
@@ -253,8 +254,7 @@ impl DeviceList {
         hbox.set_margin_top(10);
         hbox.set_margin_bottom(10);
 
-        // Device name
-        let name = device.map(|d| d.display_name()).unwrap_or_else(|| "(None)".to_string());
+        let name = device.map_or_else(|| "(None)".to_string(), super::device_selector::Device::display_name);
         let name_label = Label::new(Some(&name));
         name_label.set_xalign(0.0);
         name_label.set_hexpand(true);
@@ -263,7 +263,6 @@ impl DeviceList {
         }
         hbox.append(&name_label);
 
-        // Checkmark for selected
         if is_selected {
             let check = Label::new(Some("✓"));
             check.add_css_class("accent");
@@ -272,34 +271,27 @@ impl DeviceList {
 
         row.set_child(Some(&hbox));
 
-        // Apply initial intensity
         Self::apply_intensity(&css_provider, &css_class, intensity);
 
         HighlightableRow { row, css_provider }
     }
 
     fn apply_intensity(css_provider: &CssProvider, css_class: &str, intensity: f32) {
-        // Green highlight: rgba(74, 222, 128, alpha) where alpha lerps with intensity
-        // Max alpha 0.5 at intensity 1.0, min alpha 0.0 at intensity 0.0
         let alpha = intensity * 0.5;
         let css = format!(
-            ".{} {{ background-color: rgba(74, 222, 128, {:.3}); }}",
-            css_class, alpha
+            ".{css_class} {{ background-color: rgba(74, 222, 128, {alpha:.3}); }}"
         );
         css_provider.load_from_string(&css);
     }
 
     pub fn set_devices(&self, devices: Vec<Device>, selected_id: Option<&str>) {
-        *self.devices.borrow_mut() = devices.clone();
         *self.selected_id.borrow_mut() = selected_id.map(String::from);
 
-        // Update button label
         if let Some(id) = selected_id {
             if let Some(device) = devices.iter().find(|d| d.unique_id() == id) {
                 self.button_label.set_text(&device.display_name());
                 self.button_label.add_css_class("accent");
             } else {
-                // Device not found, show the ID
                 self.button_label.set_text(id);
                 self.button_label.add_css_class("accent");
             }
@@ -307,33 +299,32 @@ impl DeviceList {
             self.button_label.set_text("(None)");
             self.button_label.remove_css_class("accent");
         }
+
+        *self.devices.borrow_mut() = devices;
     }
 
-    pub fn update_movement(&self, intensities: &HashMap<String, f32>) {
-        // Update stored intensities
-        *self.movement_intensities.borrow_mut() = intensities.clone();
-
-        // Only update if popover is visible
+    pub fn update_movement(&self, intensities: HashMap<String, f32>) {
         if self.popover.is_visible() {
             let device_rows = self.device_rows.borrow();
             for (name, highlightable) in device_rows.iter() {
                 let intensity = intensities.get(name).copied().unwrap_or(0.0);
-                // Extract CSS class from the row (it's the one starting with "device-row-")
                 if let Some(css_class) = highlightable.row.css_classes().iter()
                     .find(|c| c.starts_with("device-row-"))
-                    .map(|c| c.to_string())
+                    .map(std::string::ToString::to_string)
                 {
                     Self::apply_intensity(&highlightable.css_provider, &css_class, intensity);
                 }
             }
+            drop(device_rows);
         }
+        *self.movement_intensities.borrow_mut() = intensities;
     }
 
     pub fn connect_changed<F: Fn(Option<Device>) + 'static>(self: &Rc<Self>, callback: F) {
         *self.on_changed.borrow_mut() = Some(Box::new(callback));
     }
 
-    pub fn connect_popover_visibility<F: Fn(bool) + 'static>(self: &Rc<Self>, callback: F) {
+    pub fn connect_popover_visibility<F: Fn(PopoverState) + 'static>(self: &Rc<Self>, callback: F) {
         *self.on_popover_visibility.borrow_mut() = Some(Box::new(callback));
     }
 }

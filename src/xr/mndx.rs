@@ -1,5 +1,3 @@
-//! MNDX_xdev_space OpenXR extension wrapper for Monado device spaces.
-
 #![allow(non_camel_case_types, non_snake_case)]
 
 use openxr as xr;
@@ -11,11 +9,11 @@ pub struct Mndx {
 }
 
 struct MndxPfn {
-    xr_create_xdev_list: unsafe extern "C" fn(xr::sys::Session, *const XrCreateXDevListInfoMNDX, *mut XrXDevListMNDX) -> xr::sys::Result,
-    xr_destroy_xdev_list: unsafe extern "C" fn(XrXDevListMNDX) -> xr::sys::Result,
-    xr_enumerate_xdevs: unsafe extern "C" fn(XrXDevListMNDX, u32, *mut u32, *mut XrXDevIdMNDX) -> xr::sys::Result,
-    xr_get_xdev_properties: unsafe extern "C" fn(XrXDevListMNDX, *const XrGetXDevInfoMNDX, *mut XrXDevPropertiesMNDX) -> xr::sys::Result,
-    xr_create_xdev_space: unsafe extern "C" fn(xr::sys::Session, *const XrCreateXDevSpaceInfoMNDX, *mut xr::sys::Space) -> xr::sys::Result,
+    create_xdev_list: unsafe extern "C" fn(xr::sys::Session, *const XrCreateXDevListInfoMNDX, *mut XrXDevListMNDX) -> xr::sys::Result,
+    destroy_xdev_list: unsafe extern "C" fn(XrXDevListMNDX) -> xr::sys::Result,
+    enumerate_xdevs: unsafe extern "C" fn(XrXDevListMNDX, u32, *mut u32, *mut XrXDevIdMNDX) -> xr::sys::Result,
+    get_xdev_properties: unsafe extern "C" fn(XrXDevListMNDX, *const XrGetXDevInfoMNDX, *mut XrXDevPropertiesMNDX) -> xr::sys::Result,
+    create_xdev_space: unsafe extern "C" fn(xr::sys::Session, *const XrCreateXDevSpaceInfoMNDX, *mut xr::sys::Space) -> xr::sys::Result,
 }
 
 impl Mndx {
@@ -23,11 +21,11 @@ impl Mndx {
         // Validate all function pointers are non-null during construction
         // so callers never hit a None unwrap at runtime.
         let pfn = MndxPfn {
-            xr_create_xdev_list: load_pfn(instance, b"xrCreateXDevListMNDX\0")?,
-            xr_destroy_xdev_list: load_pfn(instance, b"xrDestroyXDevListMNDX\0")?,
-            xr_enumerate_xdevs: load_pfn(instance, b"xrEnumerateXDevsMNDX\0")?,
-            xr_get_xdev_properties: load_pfn(instance, b"xrGetXDevPropertiesMNDX\0")?,
-            xr_create_xdev_space: load_pfn(instance, b"xrCreateXDevSpaceMNDX\0")?,
+            create_xdev_list: load_pfn(instance, b"xrCreateXDevListMNDX\0")?,
+            destroy_xdev_list: load_pfn(instance, b"xrDestroyXDevListMNDX\0")?,
+            enumerate_xdevs: load_pfn(instance, b"xrEnumerateXDevsMNDX\0")?,
+            get_xdev_properties: load_pfn(instance, b"xrGetXDevPropertiesMNDX\0")?,
+            create_xdev_space: load_pfn(instance, b"xrCreateXDevSpaceMNDX\0")?,
         };
 
         Ok(Self { pfn: Arc::new(pfn) })
@@ -42,7 +40,7 @@ impl Mndx {
         let mut list: XrXDevListMNDX = unsafe { MaybeUninit::zeroed().assume_init() };
 
         let result = unsafe {
-            (self.pfn.xr_create_xdev_list)(session.as_raw(), &create_info, &mut list)
+            (self.pfn.create_xdev_list)(session.as_raw(), &raw const create_info, &raw mut list)
         };
 
         if result != xr::sys::Result::SUCCESS {
@@ -76,12 +74,13 @@ impl XDevList {
     pub fn enumerate_xdevs(&self) -> Result<Vec<XDev>, MndxError> {
         let mut raw_xdevs = Vec::with_capacity(64);
         let mut xdev_count: u32 = 0;
+        let capacity: u32 = raw_xdevs.capacity().try_into().unwrap_or(64);
 
         let result = unsafe {
-            (self.mndx.pfn.xr_enumerate_xdevs)(
+            (self.mndx.pfn.enumerate_xdevs)(
                 self.inner.id,
-                raw_xdevs.capacity() as _,
-                &mut xdev_count,
+                capacity,
+                &raw mut xdev_count,
                 raw_xdevs.as_mut_ptr(),
             )
         };
@@ -101,7 +100,7 @@ impl XDevList {
 
 impl Drop for XDevListInner {
     fn drop(&mut self) {
-        unsafe { (self.mndx_pfn.xr_destroy_xdev_list)(self.id) };
+        unsafe { (self.mndx_pfn.destroy_xdev_list)(self.id) };
     }
 }
 
@@ -138,7 +137,7 @@ impl XDev {
         };
 
         let result = unsafe {
-            (list.mndx.pfn.xr_get_xdev_properties)(list.inner.id, &info, &mut properties)
+            (list.mndx.pfn.get_xdev_properties)(list.inner.id, &raw const info, &raw mut properties)
         };
 
         if result != xr::sys::Result::SUCCESS {
@@ -154,7 +153,7 @@ impl XDev {
             .to_string_lossy()
             .into();
 
-        Ok(XDev {
+        Ok(Self {
             inner: Arc::new(XDevInner { id, name, serial, can_create_space: properties.can_create_space.into() }),
             list,
         })
@@ -176,7 +175,7 @@ impl XDev {
         let mut space: xr::sys::Space = unsafe { MaybeUninit::zeroed().assume_init() };
 
         let result = unsafe {
-            (self.list.mndx.pfn.xr_create_xdev_space)(session.as_raw(), &create_info, &mut space)
+            (self.list.mndx.pfn.create_xdev_space)(session.as_raw(), &raw const create_info, &raw mut space)
         };
 
         if result != xr::sys::Result::SUCCESS {
@@ -211,17 +210,17 @@ pub enum MndxError {
 
 // --- FFI types (ABI-required, not part of public API) ---
 
-pub(crate) type XrXDevIdMNDX = u64;
+pub type XrXDevIdMNDX = u64;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub(crate) struct XrXDevListMNDX_T { _unused: [u8; 0] }
-pub(crate) type XrXDevListMNDX = *mut XrXDevListMNDX_T;
+pub struct XrXDevListMNDX_T { _unused: [u8; 0] }
+pub type XrXDevListMNDX = *mut XrXDevListMNDX_T;
 
-const XR_TYPE_CREATE_XDEV_LIST_INFO_MNDX: i32 = 1000444002;
-const XR_TYPE_GET_XDEV_INFO_MNDX: i32 = 1000444003;
-const XR_TYPE_XDEV_PROPERTIES_MNDX: i32 = 1000444004;
-const XR_TYPE_CREATE_XDEV_SPACE_INFO_MNDX: i32 = 1000444005;
+const XR_TYPE_CREATE_XDEV_LIST_INFO_MNDX: i32 = 1_000_444_002;
+const XR_TYPE_GET_XDEV_INFO_MNDX: i32 = 1_000_444_003;
+const XR_TYPE_XDEV_PROPERTIES_MNDX: i32 = 1_000_444_004;
+const XR_TYPE_CREATE_XDEV_SPACE_INFO_MNDX: i32 = 1_000_444_005;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -260,16 +259,16 @@ struct XrCreateXDevSpaceInfoMNDX {
 
 // --- FFI loader ---
 
-/// Loads a non-null function pointer from the OpenXR instance.
-/// Option<fn> has guaranteed niche optimization (None = null pointer).
+// Loads a non-null function pointer from the `OpenXR` instance.
+// Option<fn> has guaranteed niche optimization (None = null pointer).
 fn load_pfn<T>(instance: &xr::Instance, name: &[u8]) -> Result<T, MndxError> {
     let mut result: Option<T> = None;
 
     let load_result = unsafe {
         (instance.fp().get_instance_proc_addr)(
             instance.as_raw(),
-            name.as_ptr() as _,
-            &mut result as *mut Option<T> as *mut _,
+            name.as_ptr().cast(),
+            (&raw mut result).cast(),
         )
     };
 

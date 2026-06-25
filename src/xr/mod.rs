@@ -15,7 +15,7 @@ pub trait MessageSender: Send {
 
 impl MessageSender for mpsc::Sender<CalibrationMessage> {
     fn send(&self, msg: CalibrationMessage) -> Result<(), String> {
-        mpsc::Sender::send(self, msg).map_err(|e| e.to_string())
+        Self::send(self, msg).map_err(|e| e.to_string())
     }
 }
 
@@ -27,8 +27,8 @@ impl MessageSender for async_channel::Sender<CalibrationMessage> {
 
 pub use mndx::Mndx;
 
-// XR_MND_headless extension structures
-const XR_TYPE_GRAPHICS_BINDING_HEADLESS_MND: i32 = 1000246000;
+
+const XR_TYPE_GRAPHICS_BINDING_HEADLESS_MND: i32 = 1_000_246_000;
 
 #[repr(C)]
 struct GraphicsBindingHeadlessMND {
@@ -36,7 +36,7 @@ struct GraphicsBindingHeadlessMND {
     next: *const std::ffi::c_void,
 }
 
-// Minimal Graphics implementation for headless mode
+
 struct Headless;
 
 impl xr::Graphics for Headless {
@@ -64,7 +64,7 @@ impl xr::Graphics for Headless {
     ) -> xr::Result<xr::sys::Session> {
         let session_create_info = xr::sys::SessionCreateInfo {
             ty: xr::sys::SessionCreateInfo::TYPE,
-            next: info as *const _ as *const _,
+            next: std::ptr::from_ref(info).cast(),
             create_flags: xr::sys::SessionCreateFlags::EMPTY,
             system_id: system,
         };
@@ -74,8 +74,8 @@ impl xr::Graphics for Headless {
         let result = unsafe {
             (instance.fp().create_session)(
                 instance.as_raw(),
-                &session_create_info,
-                &mut session_raw,
+                &raw const session_create_info,
+                &raw mut session_raw,
             )
         };
 
@@ -100,34 +100,27 @@ pub struct XrSession {
 
 impl XrSession {
     pub fn new() -> Result<Self, XrError> {
-        // 1. Load OpenXR runtime
         let entry = unsafe { xr::Entry::load() }
-            .map_err(|e| XrError::RuntimeError(format!("Failed to load OpenXR: {:?}", e)))?;
+            .map_err(|e| XrError::RuntimeError(format!("Failed to load OpenXR: {e:?}")))?;
 
-        // 2. Enumerate available extensions
         let available = entry.enumerate_extensions()
-            .map_err(|e| XrError::RuntimeError(format!("Failed to enumerate extensions: {:?}", e)))?;
+            .map_err(|e| XrError::RuntimeError(format!("Failed to enumerate extensions: {e:?}")))?;
 
-        // 3. Check for required MND_headless extension
         if !available.mnd_headless {
             return Err(XrError::ExtensionNotAvailable("MND_headless".to_string()));
         }
 
-        // 4. Build extension set
         let mut exts = xr::ExtensionSet::default();
         exts.mnd_headless = true;
 
-        // Enable optional extensions if available
         let has_mndx = available.other.iter().any(|e| e == "XR_MNDX_xdev_space");
         if has_mndx {
             exts.other.push("XR_MNDX_xdev_space".to_string());
         }
-        // Enable time conversion for getting current time
         if available.khr_convert_timespec_time {
             exts.khr_convert_timespec_time = true;
         }
 
-        // 5. Create instance
         let instance = entry.create_instance(
             &xr::ApplicationInfo {
                 application_name: "spacecal-for-monado",
@@ -138,13 +131,11 @@ impl XrSession {
             },
             &exts,
             &[],
-        ).map_err(|e| XrError::InstanceCreationFailed(format!("{:?}", e)))?;
+        ).map_err(|e| XrError::InstanceCreationFailed(format!("{e:?}")))?;
 
-        // 6. Get system
         let system = instance.system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)
-            .map_err(|e| XrError::RuntimeError(format!("Failed to get system: {:?}", e)))?;
+            .map_err(|e| XrError::RuntimeError(format!("Failed to get system: {e:?}")))?;
 
-        // 7. Create headless session
         let graphics_binding = GraphicsBindingHeadlessMND {
             ty: xr::sys::StructureType::from_raw(XR_TYPE_GRAPHICS_BINDING_HEADLESS_MND),
             next: ptr::null(),
@@ -152,13 +143,11 @@ impl XrSession {
 
         let (session, _frame_waiter, _frame_stream) = unsafe {
             instance.create_session::<Headless>(system, &graphics_binding)
-                .map_err(|e| XrError::SessionCreationFailed(format!("{:?}", e)))?
+                .map_err(|e| XrError::SessionCreationFailed(format!("{e:?}")))?
         };
 
-        // Convert to AnyGraphics to match the struct field type
         let session = session.into_any_graphics();
 
-        // 8. Load MNDX extension
         let mndx = if has_mndx {
             Mndx::new(&instance).ok()
         } else {
@@ -177,160 +166,109 @@ impl XrSession {
     }
 }
 
-// Movement detection constants
-const MOVEMENT_LINEAR_THRESHOLD: f32 = 0.2; // m/s
+
+const MOVEMENT_LINEAR_THRESHOLD: f32 = 0.2;
 const MOVEMENT_ANGULAR_THRESHOLD: f32 = 0.5; // rad/s (about 30 deg/s)
 const MOVEMENT_FADE_DURATION: f32 = 2.0;
 
+fn mag3(v: xr::Vector3f) -> f32 {
+    (v.x * v.x + v.y * v.y + v.z * v.z).sqrt()
+}
+
+struct CachedDevice {
+    id: String,
+    space: xr::Space,
+}
+
+struct MovementCache {
+    _list: mndx::XDevList,
+    reference_space: xr::Space,
+    devices: Vec<CachedDevice>,
+}
+
+fn build_movement_cache(mndx: &mndx::Mndx, session: &xr::Session<xr::AnyGraphics>) -> Option<MovementCache> {
+    let list = mndx.create_list(session).ok()?;
+    let xdevs = list.enumerate_xdevs().ok()?;
+    let reference_space = session
+        .create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)
+        .ok()?;
+
+    let mut devices = Vec::with_capacity(xdevs.len());
+    for d in &xdevs {
+        if !d.can_create_space() {
+            continue;
+        }
+        let id = {
+            let s = d.serial();
+            if s.is_empty() { d.name().to_string() } else { s.to_string() }
+        };
+        if let Ok(space) = d.create_space(session.clone()) {
+            devices.push(CachedDevice { id, space });
+        }
+    }
+
+    if devices.is_empty() {
+        return None;
+    }
+
+    Some(MovementCache { _list: list, reference_space, devices })
+}
+
 struct DeviceMovementState {
-    device_id: String,  // Serial or name fallback
+    device_id: String,
     last_moving_time: Option<Instant>,
 }
 
+#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 pub fn xr_event_loop<S: MessageSender>(
     cmd_rx: mpsc::Receiver<CalibrationCommand>,
     msg_tx: S,
 ) {
     let mut xr_session = XrSession::new().ok();
 
-    // Movement detection state
     let mut movement_detection_active = false;
+    let mut movement_cache: Option<MovementCache> = None;
     let mut movement_state: Vec<DeviceMovementState> = Vec::new();
     let mut last_movement_update = Instant::now();
     let mut last_reconnect_attempt = Instant::now();
     let mut consecutive_failures = 0u32;
 
-    // Main event loop - use timeout when movement detection is active
     loop {
         let recv_result = if movement_detection_active {
-            // Non-blocking with short timeout for responsive movement updates
-            cmd_rx.recv_timeout(Duration::from_millis(50))
+            cmd_rx.recv_timeout(Duration::from_millis(100))
         } else {
-            // Blocking when idle
             cmd_rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)
         };
 
-        // Try to reconnect OpenXR if disconnected (every 2 seconds)
-        // or if we've had too many consecutive failures (session became stale)
-        if (xr_session.is_none() || consecutive_failures >= 5) && last_reconnect_attempt.elapsed() >= Duration::from_secs(2) {
+        if (xr_session.is_none() || consecutive_failures >= 5)
+            && last_reconnect_attempt.elapsed() >= Duration::from_secs(2)
+        {
+            movement_cache = None;
+            if movement_detection_active {
+                movement_detection_active = false;
+                movement_state.clear();
+                let _ = msg_tx.send(CalibrationMessage::MovementUpdate { movements: vec![] });
+            }
             last_reconnect_attempt = Instant::now();
             consecutive_failures = 0;
             xr_session = XrSession::new().ok();
         }
 
-        // Handle movement detection polling using OpenXR velocity (like motoc)
         if movement_detection_active && last_movement_update.elapsed() >= Duration::from_millis(100) {
-            let mut operation_succeeded = false;
+            let mut op_ok = false;
 
-            if let Some(ref xr_session) = xr_session
-                && let Some(ref mndx) = xr_session.mndx
-                && let Ok(list) = mndx.create_list(&xr_session.session)
-                && let Ok(devices) = list.enumerate_xdevs()
-                && let Ok(reference_space) = xr_session.session.create_reference_space(
-                    xr::ReferenceSpaceType::LOCAL,
-                    xr::Posef::IDENTITY,
-                )
+            if let Some(ref cache) = movement_cache
+                && let Some(ref xr_session) = xr_session
             {
-                operation_succeeded = true;
-                let time = xr_session.now();
-                let now = Instant::now();
-
-                for device in devices.iter() {
-                    if !device.can_create_space() {
-                        continue;
-                    }
-
-                    if let Ok(space) = device.create_space(xr_session.session.clone()) {
-                        // Use relate() to get velocity directly from OpenXR (like motoc)
-                        if let Ok((_location, velocity)) = space.relate(&reference_space, time) {
-                            let linear_valid = velocity.velocity_flags.contains(
-                                xr::SpaceVelocityFlags::LINEAR_VALID
-                            );
-                            let angular_valid = velocity.velocity_flags.contains(
-                                xr::SpaceVelocityFlags::ANGULAR_VALID
-                            );
-
-                            // Check linear velocity (translation speed)
-                            let linear_moving = if linear_valid {
-                                let vel = velocity.linear_velocity;
-                                let speed = (vel.x * vel.x + vel.y * vel.y + vel.z * vel.z).sqrt();
-                                speed > MOVEMENT_LINEAR_THRESHOLD
-                            } else {
-                                false
-                            };
-
-                            // Check angular velocity (rotation speed)
-                            let angular_moving = if angular_valid {
-                                let ang = velocity.angular_velocity;
-                                let spin = (ang.x * ang.x + ang.y * ang.y + ang.z * ang.z).sqrt();
-                                spin > MOVEMENT_ANGULAR_THRESHOLD
-                            } else {
-                                false
-                            };
-
-                            // Device is moving if either translating or rotating
-                            let is_moving = linear_moving || angular_moving;
-
-                            if linear_valid || angular_valid {
-                                // Use serial as unique ID, fallback to name
-                                let device_id = {
-                                    let serial = device.serial();
-                                    if serial.is_empty() {
-                                        device.name().to_string()
-                                    } else {
-                                        serial.to_string()
-                                    }
-                                };
-
-                                // Find or create state entry
-                                let state = movement_state.iter_mut()
-                                    .find(|s| s.device_id == device_id);
-
-                                if let Some(s) = state {
-                                    if is_moving {
-                                        s.last_moving_time = Some(now);
-                                    }
-                                } else {
-                                    movement_state.push(DeviceMovementState {
-                                        device_id,
-                                        last_moving_time: if is_moving {
-                                            Some(now)
-                                        } else {
-                                            None
-                                        },
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Compute movement intensities with fade
-                let movements: Vec<DeviceMovement> = movement_state
-                    .iter()
-                    .filter_map(|s| {
-                        let last_moving = s.last_moving_time?;
-                        let elapsed = now.duration_since(last_moving).as_secs_f32();
-                        if elapsed < MOVEMENT_FADE_DURATION {
-                            // Intensity fades from 1.0 to 0.0 over MOVEMENT_FADE_DURATION
-                            let intensity = 1.0 - (elapsed / MOVEMENT_FADE_DURATION);
-                            Some(DeviceMovement {
-                                device_id: s.device_id.clone(),
-                                intensity,
-                            })
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-
-                let _ = msg_tx.send(CalibrationMessage::MovementUpdate { movements });
+                op_ok = true;
+                process_movement_update(cache, xr_session, &mut movement_state, &msg_tx);
+            } else if xr_session.is_some() {
+                consecutive_failures += 1;
             }
 
-            // Track consecutive failures to detect stale sessions
-            if operation_succeeded {
+            if op_ok {
                 consecutive_failures = 0;
-            } else if xr_session.is_some() {
+            } else if xr_session.is_some() && movement_cache.is_some() {
                 consecutive_failures += 1;
             }
 
@@ -341,534 +279,403 @@ pub fn xr_event_loop<S: MessageSender>(
             Ok(CalibrationCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                 break;
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                // Continue loop for movement detection polling
-                continue;
-            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
             Ok(CalibrationCommand::StartMovementDetection) => {
                 movement_detection_active = true;
                 movement_state.clear();
                 last_movement_update = Instant::now();
+                if let Some(ref xr_session) = xr_session
+                    && let Some(ref mndx) = xr_session.mndx
+                {
+                    movement_cache = build_movement_cache(mndx, &xr_session.session);
+                }
             }
             Ok(CalibrationCommand::StopMovementDetection) => {
+                movement_cache = None;
                 movement_detection_active = false;
                 movement_state.clear();
-                // Send empty update to clear highlights
                 let _ = msg_tx.send(CalibrationMessage::MovementUpdate { movements: vec![] });
             }
             Ok(CalibrationCommand::StartSampled { source_serial, target_serial, target_origin_index, sample_count, stage_offset }) => {
-
-                // Check if XR is available
-                if xr_session.is_none() {
-                    let _ = msg_tx.send(CalibrationMessage::Error(
-                        "Connect to Monado to enable calibration".to_string()
-                    ));
-                    continue;
-                }
-
-                // 3-second countdown before calibration starts
-                for seconds_left in (1..=3).rev() {
-                    let _ = msg_tx.send(CalibrationMessage::Countdown { seconds: seconds_left });
-                    std::thread::sleep(Duration::from_secs(1));
-                }
-
-                // Implementation of sampled calibration
-                if let Some(ref xr_session) = xr_session {
-                    // Get MNDX extension
-                    let mndx = match &xr_session.mndx {
-                        Some(m) => m,
-                        None => {
-                            let _ = msg_tx.send(CalibrationMessage::Error(
-                                "MNDX_xdev_space extension not available".to_string()
-                            ));
-                            continue;
-                        }
-                    };
-
-                    // Create device list
-                    let list = match mndx.create_list(&xr_session.session) {
-                        Ok(l) => l,
-                        Err(e) => {
-                            let _ = msg_tx.send(CalibrationMessage::Error(
-                                format!("Failed to create device list: {:?}", e)
-                            ));
-                            continue;
-                        }
-                    };
-
-                    // Enumerate devices and find source/target by serial (unique ID)
-                    let devices = match list.enumerate_xdevs() {
-                        Ok(d) => d,
-                        Err(e) => {
-                            let _ = msg_tx.send(CalibrationMessage::Error(
-                                format!("Failed to enumerate devices: {:?}", e)
-                            ));
-                            continue;
-                        }
-                    };
-
-                    // Find source device by serial (or name as fallback for backward compat)
-                    let source_dev = match devices.iter().find(|d| d.serial() == source_serial || d.name() == source_serial) {
-                        Some(d) => d,
-                        None => {
-                            let _ = msg_tx.send(CalibrationMessage::Error(
-                                format!("Source device '{}' not found", source_serial)
-                            ));
-                            continue;
-                        }
-                    };
-
-                    // Find target device by serial (or name as fallback)
-                    let target_dev = match devices.iter().find(|d| d.serial() == target_serial || d.name() == target_serial) {
-                        Some(d) => d,
-                        None => {
-                            let _ = msg_tx.send(CalibrationMessage::Error(
-                                format!("Target device '{}' not found", target_serial)
-                            ));
-                            continue;
-                        }
-                    };
-
-                    // Check if both devices support space creation
-                    if !source_dev.can_create_space() {
-                        let _ = msg_tx.send(CalibrationMessage::Error(
-                            format!("Source device '{}' does not support space creation", source_dev.name())
-                        ));
-                        continue;
-                    }
-
-                    if !target_dev.can_create_space() {
-                        let _ = msg_tx.send(CalibrationMessage::Error(
-                            format!("Target device '{}' does not support space creation", target_dev.name())
-                        ));
-                        continue;
-                    }
-
-                    // Create spaces for both devices
-                    let source_space = match source_dev.create_space(xr_session.session.clone()) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            let _ = msg_tx.send(CalibrationMessage::Error(
-                                format!("Failed to create space for source device: {:?}", e)
-                            ));
-                            continue;
-                        }
-                    };
-
-                    let target_space = match target_dev.create_space(xr_session.session.clone()) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            let _ = msg_tx.send(CalibrationMessage::Error(
-                                format!("Failed to create space for target device: {:?}", e)
-                            ));
-                            continue;
-                        }
-                    };
-
-                    // Create reference space (STAGE - like motoc uses)
-                    // Using STAGE ensures poses are in a consistent floor-relative frame
-                    let reference_space = match xr_session.session.create_reference_space(
-                        xr::ReferenceSpaceType::STAGE,
-                        xr::Posef::IDENTITY,
-                    ) {
-                        Ok(space) => space,
-                        Err(_) => {
-                            // Fall back to LOCAL if STAGE not available
-                            match xr_session.session.create_reference_space(
-                                xr::ReferenceSpaceType::LOCAL,
-                                xr::Posef::IDENTITY,
-                            ) {
-                                Ok(s) => s,
-                                Err(e) => {
-                                    let _ = msg_tx.send(CalibrationMessage::Error(
-                                        format!("Failed to create reference space: {:?}", e)
-                                    ));
-                                    continue;
-                                }
-                            }
-                        }
-                    };
-
-                    // Create sample collector
-                    let mut collector = SampleCollector::new(sample_count);
-
-                    // Sample collection loop (~30Hz)
-                    let sample_interval = Duration::from_millis(33);
-                    let mut next_sample_time = Instant::now();
-
-                    while !collector.is_complete() {
-                        // Get current time from the OpenXR runtime
-                        let time = xr_session.now();
-
-                        let source_location = match source_space.locate(&reference_space, time) {
-                            Ok(loc) => loc,
-                            Err(e) => {
-                                let _ = msg_tx.send(CalibrationMessage::Error(
-                                    format!("Failed to locate source space: {:?}", e)
-                                ));
-                                break;
-                            }
-                        };
-
-                        let target_location = match target_space.locate(&reference_space, time) {
-                            Ok(loc) => loc,
-                            Err(e) => {
-                                let _ = msg_tx.send(CalibrationMessage::Error(
-                                    format!("Failed to locate target space: {:?}", e)
-                                ));
-                                break;
-                            }
-                        };
-
-                        let source_valid = source_location.location_flags.contains(
-                            xr::SpaceLocationFlags::POSITION_VALID | xr::SpaceLocationFlags::ORIENTATION_VALID
-                        );
-                        let target_valid = target_location.location_flags.contains(
-                            xr::SpaceLocationFlags::POSITION_VALID | xr::SpaceLocationFlags::ORIENTATION_VALID
-                        );
-
-                        if !source_valid || !target_valid {
-                            next_sample_time += sample_interval;
-                            let now = Instant::now();
-                            if next_sample_time > now {
-                                std::thread::sleep(next_sample_time - now);
-                            }
-                            continue;
-                        }
-
-                        let source_pose = source_location.pose;
-                        let target_pose = target_location.pose;
-
-                        // Convert poses to TransformD for potential stage offset transformation
-                        let mut source_transform = TransformD::from_xr_pose(
-                            [source_pose.position.x, source_pose.position.y, source_pose.position.z],
-                            [source_pose.orientation.x, source_pose.orientation.y,
-                             source_pose.orientation.z, source_pose.orientation.w],
-                        );
-                        let mut target_transform = TransformD::from_xr_pose(
-                            [target_pose.position.x, target_pose.position.y, target_pose.position.z],
-                            [target_pose.orientation.x, target_pose.orientation.y,
-                             target_pose.orientation.z, target_pose.orientation.w],
-                        );
-
-                        // Apply stage offset transformation (like motoc does)
-                        // This transforms poses to a common world frame
-                        if let Some((pos, ori)) = &stage_offset {
-                            let stage = TransformD::from_xr_pose(
-                                [pos[0] as f32, pos[1] as f32, pos[2] as f32],
-                                [ori[0] as f32, ori[1] as f32, ori[2] as f32, ori[3] as f32],
-                            );
-                            source_transform = stage.mul(&source_transform);
-                            target_transform = stage.mul(&target_transform);
-                        }
-
-                        let sample = PoseSample::from_xr_poses(
-                            source_transform.position_f32(),
-                            source_transform.orientation_f32(),
-                            target_transform.position_f32(),
-                            target_transform.orientation_f32(),
-                        );
-
-                        // Add sample to collector
-                        if let Err(e) = collector.add_sample(sample) {
-                            let _ = msg_tx.send(CalibrationMessage::Error(
-                                format!("Invalid pose sample: {:?}", e)
-                            ));
-                            break;
-                        }
-
-                        // Send progress update
-                        let (collected, total) = collector.progress();
-                        let _ = msg_tx.send(CalibrationMessage::Progress { collected, total });
-
-                        // Wait before next sample (deadline-based timing)
-                        if !collector.is_complete() {
-                            next_sample_time += sample_interval;
-                            let now = Instant::now();
-                            if next_sample_time > now {
-                                std::thread::sleep(next_sample_time - now);
-                            }
-                        }
-                    }
-
-                    // Compute calibration if we have enough samples
-                    if collector.is_complete() {
-                        match collector.compute_calibration() {
-                            Ok((offset, median_error_degrees, axis_diversity)) => {
-                                // The calibration computes: O = S × T⁻¹ (averaged over samples)
-                                // where S = source pose, T = target pose
-                                // This offset satisfies: O × T = S
-                                // Apply O to target tracking origin to align it with source.
-                                let result = CalibrationResult {
-                                    transform: offset,
-                                    target_origin_index,
-                                    median_error_degrees,
-                                    axis_diversity,
-                                };
-
-                                let _ = msg_tx.send(CalibrationMessage::SampledComplete(result));
-                            }
-                            Err(e) => {
-                                let user_msg = match &e {
-                                    crate::error::CalibrationError::InsufficientSamples { .. } =>
-                                        "Not enough movement \u{2014} grip both devices firmly and sweep a wide figure-eight".to_string(),
-                                    crate::error::CalibrationError::SvdFailed =>
-                                        "Calibration math failed \u{2014} try again with more varied motion".to_string(),
-                                    other => format!("Calibration failed: {:?}", other),
-                                };
-                                let _ = msg_tx.send(CalibrationMessage::Error(user_msg));
-                            }
-                        }
-                    } else {
-                        let _ = msg_tx.send(CalibrationMessage::Error(
-                            "Sample collection incomplete".to_string()
-                        ));
-                    }
-                }
+                report(&msg_tx, handle_start_sampled(
+                    xr_session.as_ref(),
+                    &msg_tx,
+                    &source_serial,
+                    &target_serial,
+                    target_origin_index,
+                    sample_count,
+                    stage_offset.as_ref(),
+                ));
             }
             Ok(CalibrationCommand::CalibrateFloor { target_serial }) => {
-                if xr_session.is_none() {
-                    let _ = msg_tx.send(CalibrationMessage::Error(
-                        "Connect to Monado to enable floor calibration".to_string()
-                    ));
-                    continue;
-                }
-
-                // Floor calibration using target device position
-                if let Some(ref xr_session) = xr_session {
-                    // Get MNDX extension to query device poses
-                    let mndx = match &xr_session.mndx {
-                        Some(m) => m,
-                        None => {
-                            let _ = msg_tx.send(CalibrationMessage::Error(
-                                "MNDX extension not available".to_string()
-                            ));
-                            continue;
-                        }
-                    };
-
-                    // Create device list
-                    let list = match mndx.create_list(&xr_session.session) {
-                        Ok(l) => l,
-                        Err(e) => {
-                            let _ = msg_tx.send(CalibrationMessage::Error(
-                                format!("Failed to create device list: {:?}", e)
-                            ));
-                            continue;
-                        }
-                    };
-
-                    // Enumerate devices
-                    let devices = match list.enumerate_xdevs() {
-                        Ok(d) => d,
-                        Err(e) => {
-                            let _ = msg_tx.send(CalibrationMessage::Error(
-                                format!("Failed to enumerate devices: {:?}", e)
-                            ));
-                            continue;
-                        }
-                    };
-
-                    // Find target device by serial (or name as fallback)
-                    let target_dev = match devices.iter().find(|d| d.serial() == target_serial || d.name() == target_serial) {
-                        Some(d) => d,
-                        None => {
-                            let _ = msg_tx.send(CalibrationMessage::Error(
-                                format!("Target device '{}' not found", target_serial)
-                            ));
-                            continue;
-                        }
-                    };
-
-                    // Check if device supports space creation
-                    if !target_dev.can_create_space() {
-                        let _ = msg_tx.send(CalibrationMessage::Error(
-                            format!("Target device '{}' does not support pose tracking", target_dev.name())
-                        ));
-                        continue;
-                    }
-
-                    // Create space for target device
-                    let target_space = match target_dev.create_space(xr_session.session.clone()) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            let _ = msg_tx.send(CalibrationMessage::Error(
-                                format!("Failed to create space for target device: {:?}", e)
-                            ));
-                            continue;
-                        }
-                    };
-
-                    // Create reference space (STAGE for floor-relative)
-                    let reference_space = match xr_session.session.create_reference_space(
-                        xr::ReferenceSpaceType::STAGE,
-                        xr::Posef::IDENTITY,
-                    ) {
-                        Ok(space) => space,
-                        Err(_) => {
-                            match xr_session.session.create_reference_space(
-                                xr::ReferenceSpaceType::LOCAL,
-                                xr::Posef::IDENTITY,
-                            ) {
-                                Ok(space) => space,
-                                Err(e) => {
-                                    let _ = msg_tx.send(CalibrationMessage::Error(
-                                        format!("Failed to create reference space: {:?}", e)
-                                    ));
-                                    continue;
-                                }
-                            }
-                        }
-                    };
-
-                    // Collect floor samples from target device Y position
-                    let mut floor_cal = FloorCalibrator::with_default_config();
-                    floor_cal.start();
-
-                    let sample_interval = Duration::from_millis(33); // ~30Hz
-                    let mut next_sample_time = Instant::now();
-
-                    while floor_cal.is_active() {
-                        let time = xr_session.now();
-
-                        // Locate target device relative to STAGE
-                        let location = match target_space.locate(&reference_space, time) {
-                            Ok(loc) => loc,
-                            Err(_) => {
-                                // Skip this sample if locate fails
-                                next_sample_time += sample_interval;
-                                let now = Instant::now();
-                                if next_sample_time > now {
-                                    std::thread::sleep(next_sample_time - now);
-                                }
-                                continue;
-                            }
-                        };
-
-                        // Check if pose is valid
-                        let is_valid = location.location_flags.contains(
-                            xr::SpaceLocationFlags::POSITION_VALID
-                        );
-
-                        if is_valid {
-                            // Use the device's Y position as floor height
-                            let height = location.pose.position.y;
-
-                            match floor_cal.add_sample(height) {
-                                Ok(Some(adjustment)) => {
-                                    let _ = msg_tx.send(CalibrationMessage::FloorComplete {
-                                        height_adjustment: adjustment,
-                                    });
-                                    break;
-                                }
-                                Ok(None) => {
-                                    let (collected, total) = floor_cal.progress();
-                                    let _ = msg_tx.send(CalibrationMessage::FloorProgress { collected, total });
-                                }
-                                Err(e) => {
-                                    let _ = msg_tx.send(CalibrationMessage::Error(
-                                        format!("Floor calibration failed: {:?}", e)
-                                    ));
-                                    break;
-                                }
-                            }
-                        }
-
-                        next_sample_time += sample_interval;
-                        let now = Instant::now();
-                        if next_sample_time > now {
-                            std::thread::sleep(next_sample_time - now);
-                        }
-                    }
-                }
+                report(&msg_tx, handle_calibrate_floor(xr_session.as_ref(), &msg_tx, &target_serial));
             }
             Ok(CalibrationCommand::Recenter) => {
-                if xr_session.is_none() {
-                    let _ = msg_tx.send(CalibrationMessage::Error(
-                        "Connect to Monado to enable recenter".to_string()
-                    ));
-                    continue;
-                }
-
-                // Recenter using HMD pose (VIEW space relative to STAGE)
-                if let Some(ref xr_session) = xr_session {
-                    // 3-second countdown (use separate message so only recenter button updates)
-                    for seconds_left in (1..=3).rev() {
-                        let _ = msg_tx.send(CalibrationMessage::RecenterCountdown { seconds: seconds_left });
-                        std::thread::sleep(Duration::from_secs(1));
-                    }
-
-                    // Create VIEW reference space (current HMD pose)
-                    let view_space = match xr_session.session.create_reference_space(
-                        xr::ReferenceSpaceType::VIEW,
-                        xr::Posef::IDENTITY,
-                    ) {
-                        Ok(space) => space,
-                        Err(e) => {
-                            let _ = msg_tx.send(CalibrationMessage::Error(
-                                format!("Failed to create VIEW space: {:?}", e)
-                            ));
-                            continue;
-                        }
-                    };
-
-                    // Create STAGE reference space (world-fixed)
-                    let stage_space = match xr_session.session.create_reference_space(
-                        xr::ReferenceSpaceType::STAGE,
-                        xr::Posef::IDENTITY,
-                    ) {
-                        Ok(space) => space,
-                        Err(e) => {
-                            let _ = msg_tx.send(CalibrationMessage::Error(
-                                format!("Failed to create STAGE space: {:?}", e)
-                            ));
-                            continue;
-                        }
-                    };
-
-                    // Get HMD pose: locate VIEW origin relative to STAGE
-                    // VIEW origin is at the current HMD position/orientation
-                    let time = xr_session.now();
-                    let location = match view_space.locate(&stage_space, time) {
-                        Ok(loc) => loc,
-                        Err(e) => {
-                            let _ = msg_tx.send(CalibrationMessage::Error(
-                                format!("Failed to locate HMD: {:?}", e)
-                            ));
-                            continue;
-                        }
-                    };
-
-                    let pos_valid = location.location_flags.contains(xr::SpaceLocationFlags::POSITION_VALID);
-                    let ori_valid = location.location_flags.contains(xr::SpaceLocationFlags::ORIENTATION_VALID);
-
-                    if !pos_valid || !ori_valid {
-                        let _ = msg_tx.send(CalibrationMessage::Error(
-                            format!("HMD pose not valid (pos={}, ori={})", pos_valid, ori_valid)
-                        ));
-                        continue;
-                    }
-
-                    // Get full HMD pose in STAGE coords
-                    let position = [
-                        location.pose.position.x,
-                        location.pose.position.y,
-                        location.pose.position.z,
-                    ];
-                    let orientation = [
-                        location.pose.orientation.x,
-                        location.pose.orientation.y,
-                        location.pose.orientation.z,
-                        location.pose.orientation.w,
-                    ];
-
-                    // Send full HMD pose - monado.rs will handle the transform math
-                    let _ = msg_tx.send(CalibrationMessage::RecenterComplete {
-                        position,
-                        orientation,
-                    });
-                }
+                report(&msg_tx, handle_recenter(xr_session.as_ref(), &msg_tx));
             }
         }
     }
+}
+
+fn process_movement_update<S: MessageSender>(
+    cache: &MovementCache,
+    xr_session: &XrSession,
+    movement_state: &mut Vec<DeviceMovementState>,
+    msg_tx: &S,
+) {
+    let time = xr_session.now();
+    let now = Instant::now();
+
+    for cached in &cache.devices {
+        if let Ok((_location, velocity)) = cached.space.relate(&cache.reference_space, time) {
+            let linear_valid = velocity.velocity_flags.contains(xr::SpaceVelocityFlags::LINEAR_VALID);
+            let angular_valid = velocity.velocity_flags.contains(xr::SpaceVelocityFlags::ANGULAR_VALID);
+
+            if !linear_valid && !angular_valid {
+                continue;
+            }
+
+            let linear_moving = linear_valid && mag3(velocity.linear_velocity) > MOVEMENT_LINEAR_THRESHOLD;
+            let angular_moving = angular_valid && mag3(velocity.angular_velocity) > MOVEMENT_ANGULAR_THRESHOLD;
+            let is_moving = linear_moving || angular_moving;
+
+            if let Some(s) = movement_state.iter_mut().find(|s| s.device_id == cached.id) {
+                if is_moving {
+                    s.last_moving_time = Some(now);
+                }
+            } else {
+                movement_state.push(DeviceMovementState {
+                    device_id: cached.id.clone(),
+                    last_moving_time: if is_moving { Some(now) } else { None },
+                });
+            }
+        }
+    }
+
+    let movements: Vec<DeviceMovement> = movement_state
+        .iter()
+        .filter_map(|s| {
+            let last_moving = s.last_moving_time?;
+            let elapsed = now.duration_since(last_moving).as_secs_f32();
+            if elapsed < MOVEMENT_FADE_DURATION {
+                let intensity = 1.0 - (elapsed / MOVEMENT_FADE_DURATION);
+                Some(DeviceMovement { device_id: s.device_id.clone(), intensity })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let _ = msg_tx.send(CalibrationMessage::MovementUpdate { movements });
+}
+
+#[derive(Debug)]
+enum StepError {
+    NotConnected { action: &'static str },
+    MndxUnavailable,
+    DeviceList(String),
+    Enumerate(String),
+    DeviceNotFound { role: &'static str, serial: String },
+    Unsupported { role: &'static str, name: String },
+    SpaceCreate { role: &'static str, detail: String },
+    ReferenceSpace { kind: &'static str, detail: String },
+    Locate { what: &'static str, detail: String },
+    InvalidSample(String),
+    Floor(String),
+    HmdPoseInvalid { pos_valid: bool, ori_valid: bool },
+    Compute(crate::error::CalibrationError),
+}
+
+impl StepError {
+    fn user_message(&self) -> String {
+        match self {
+            Self::NotConnected { action } => format!("Connect to Monado to enable {action}"),
+            Self::MndxUnavailable => "MNDX_xdev_space extension not available".to_string(),
+            Self::DeviceList(detail) => format!("Failed to create device list: {detail}"),
+            Self::Enumerate(detail) => format!("Failed to enumerate devices: {detail}"),
+            Self::DeviceNotFound { role, serial } => format!("{role} device '{serial}' not found"),
+            Self::Unsupported { role, name } => format!("{role} device '{name}' does not support pose tracking"),
+            Self::SpaceCreate { role, detail } => format!("Failed to create space for {} device: {detail}", role.to_lowercase()),
+            Self::ReferenceSpace { kind, detail } => format!("Failed to create {kind} space: {detail}"),
+            Self::Locate { what, detail } => format!("Failed to locate {what}: {detail}"),
+            Self::InvalidSample(detail) => format!("Invalid pose sample: {detail}"),
+            Self::Floor(detail) => format!("Floor calibration failed: {detail}"),
+            Self::HmdPoseInvalid { pos_valid, ori_valid } => format!("HMD pose not valid (pos={pos_valid}, ori={ori_valid})"),
+            Self::Compute(e) => match e {
+                crate::error::CalibrationError::InsufficientSamples { .. } =>
+                    "Not enough movement \u{2014} grip both devices firmly and sweep a wide figure-eight".to_string(),
+                crate::error::CalibrationError::SvdFailed =>
+                    "Calibration math failed \u{2014} try again with more varied motion".to_string(),
+                other => format!("Calibration failed: {other:?}"),
+            },
+        }
+    }
+}
+
+fn report<S: MessageSender>(msg_tx: &S, result: Result<(), StepError>) {
+    if let Err(e) = result {
+        let _ = msg_tx.send(CalibrationMessage::Error(e.user_message()));
+    }
+}
+
+fn sleep_until(next: &mut Instant, interval: Duration) {
+    *next += interval;
+    let now = Instant::now();
+    if *next > now {
+        std::thread::sleep(*next - now);
+    }
+}
+
+fn enumerate_devices(xr_session: &XrSession) -> Result<Vec<mndx::XDev>, StepError> {
+    let mndx = xr_session.mndx.as_ref().ok_or(StepError::MndxUnavailable)?;
+    let list = mndx.create_list(&xr_session.session)
+        .map_err(|e| StepError::DeviceList(format!("{e:?}")))?;
+    list.enumerate_xdevs()
+        .map_err(|e| StepError::Enumerate(format!("{e:?}")))
+}
+
+fn resolve_device<'a>(
+    devices: &'a [mndx::XDev],
+    serial: &str,
+    role: &'static str,
+) -> Result<&'a mndx::XDev, StepError> {
+    let dev = devices.iter()
+        .find(|d| d.serial() == serial || d.name() == serial)
+        .ok_or_else(|| StepError::DeviceNotFound { role, serial: serial.to_string() })?;
+
+    if !dev.can_create_space() {
+        return Err(StepError::Unsupported { role, name: dev.name().to_string() });
+    }
+
+    Ok(dev)
+}
+
+fn create_device_space(
+    dev: &mndx::XDev,
+    session: &xr::Session<xr::AnyGraphics>,
+    role: &'static str,
+) -> Result<xr::Space, StepError> {
+    dev.create_space(session.clone())
+        .map_err(|e| StepError::SpaceCreate { role, detail: format!("{e:?}") })
+}
+
+fn create_reference_space(
+    session: &xr::Session<xr::AnyGraphics>,
+    space_type: xr::ReferenceSpaceType,
+    kind: &'static str,
+) -> Result<xr::Space, StepError> {
+    session.create_reference_space(space_type, xr::Posef::IDENTITY)
+        .map_err(|e| StepError::ReferenceSpace { kind, detail: format!("{e:?}") })
+}
+
+fn create_stage_or_local_space(session: &xr::Session<xr::AnyGraphics>) -> Result<xr::Space, StepError> {
+    if let Ok(space) = session.create_reference_space(xr::ReferenceSpaceType::STAGE, xr::Posef::IDENTITY) {
+        return Ok(space);
+    }
+    create_reference_space(session, xr::ReferenceSpaceType::LOCAL, "reference")
+}
+
+fn collect_pose_samples<S: MessageSender>(
+    xr_session: &XrSession,
+    source_space: &xr::Space,
+    target_space: &xr::Space,
+    reference_space: &xr::Space,
+    sample_count: u32,
+    stage_offset: Option<&([f64; 3], [f64; 4])>,
+    msg_tx: &S,
+) -> Result<SampleCollector, StepError> {
+    let mut collector = SampleCollector::new(sample_count);
+
+    let sample_interval = Duration::from_millis(33);
+    let mut next_sample_time = Instant::now();
+
+    while !collector.is_complete() {
+        let time = xr_session.now();
+
+        let source_location = source_space.locate(reference_space, time)
+            .map_err(|e| StepError::Locate { what: "source space", detail: format!("{e:?}") })?;
+        let target_location = target_space.locate(reference_space, time)
+            .map_err(|e| StepError::Locate { what: "target space", detail: format!("{e:?}") })?;
+
+        let source_valid = source_location.location_flags.contains(
+            xr::SpaceLocationFlags::POSITION_VALID | xr::SpaceLocationFlags::ORIENTATION_VALID
+        );
+        let target_valid = target_location.location_flags.contains(
+            xr::SpaceLocationFlags::POSITION_VALID | xr::SpaceLocationFlags::ORIENTATION_VALID
+        );
+
+        if !source_valid || !target_valid {
+            sleep_until(&mut next_sample_time, sample_interval);
+            continue;
+        }
+
+        let source_pose = source_location.pose;
+        let target_pose = target_location.pose;
+
+        let mut source_transform = TransformD::from_xr_pose(
+            [source_pose.position.x, source_pose.position.y, source_pose.position.z],
+            [source_pose.orientation.x, source_pose.orientation.y,
+             source_pose.orientation.z, source_pose.orientation.w],
+        );
+        let mut target_transform = TransformD::from_xr_pose(
+            [target_pose.position.x, target_pose.position.y, target_pose.position.z],
+            [target_pose.orientation.x, target_pose.orientation.y,
+             target_pose.orientation.z, target_pose.orientation.w],
+        );
+
+        if let Some((pos, ori)) = stage_offset {
+            let stage = TransformD::from_position_orientation_f64(*pos, *ori);
+            source_transform = stage.mul(&source_transform);
+            target_transform = stage.mul(&target_transform);
+        }
+
+        let sample = PoseSample::from_transforms(&source_transform, &target_transform);
+        collector.add_sample(sample)
+            .map_err(|e| StepError::InvalidSample(format!("{e:?}")))?;
+
+        let (collected, total) = collector.progress();
+        let _ = msg_tx.send(CalibrationMessage::Progress { collected, total });
+
+        if !collector.is_complete() {
+            sleep_until(&mut next_sample_time, sample_interval);
+        }
+    }
+
+    Ok(collector)
+}
+
+fn handle_start_sampled<S: MessageSender>(
+    xr_session: Option<&XrSession>,
+    msg_tx: &S,
+    source_serial: &str,
+    target_serial: &str,
+    target_origin_index: u32,
+    sample_count: u32,
+    stage_offset: Option<&([f64; 3], [f64; 4])>,
+) -> Result<(), StepError> {
+    let xr_session = xr_session.ok_or(StepError::NotConnected { action: "calibration" })?;
+
+    let devices = enumerate_devices(xr_session)?;
+    let source_dev = resolve_device(&devices, source_serial, "Source")?;
+    let target_dev = resolve_device(&devices, target_serial, "Target")?;
+
+    let source_space = create_device_space(source_dev, &xr_session.session, "Source")?;
+    let target_space = create_device_space(target_dev, &xr_session.session, "Target")?;
+    let reference_space = create_stage_or_local_space(&xr_session.session)?;
+
+    // Countdown only after setup is known-good, so a misconfigured device fails fast.
+    for seconds_left in (1..=3).rev() {
+        let _ = msg_tx.send(CalibrationMessage::Countdown { seconds: seconds_left });
+        std::thread::sleep(Duration::from_secs(1));
+    }
+
+    let collector = collect_pose_samples(
+        xr_session,
+        &source_space,
+        &target_space,
+        &reference_space,
+        sample_count,
+        stage_offset,
+        msg_tx,
+    )?;
+
+    let (offset, median_error_degrees, axis_diversity) =
+        collector.compute_calibration().map_err(StepError::Compute)?;
+
+    // O = S × T⁻¹ (averaged); satisfies O × T = S, applied to the target origin.
+    let _ = msg_tx.send(CalibrationMessage::SampledComplete(CalibrationResult {
+        transform: offset,
+        target_origin_index,
+        median_error_degrees,
+        axis_diversity,
+    }));
+    Ok(())
+}
+
+fn handle_calibrate_floor<S: MessageSender>(
+    xr_session: Option<&XrSession>,
+    msg_tx: &S,
+    target_serial: &str,
+) -> Result<(), StepError> {
+    let xr_session = xr_session.ok_or(StepError::NotConnected { action: "floor calibration" })?;
+
+    let devices = enumerate_devices(xr_session)?;
+    let target_dev = resolve_device(&devices, target_serial, "Target")?;
+    let target_space = create_device_space(target_dev, &xr_session.session, "Target")?;
+    let reference_space = create_stage_or_local_space(&xr_session.session)?;
+
+    let mut floor_cal = FloorCalibrator::with_default_config();
+    floor_cal.start();
+
+    let sample_interval = Duration::from_millis(33);
+    let mut next_sample_time = Instant::now();
+
+    while floor_cal.is_active() {
+        let time = xr_session.now();
+
+        let Ok(location) = target_space.locate(&reference_space, time) else {
+            sleep_until(&mut next_sample_time, sample_interval);
+            continue;
+        };
+
+        if location.location_flags.contains(xr::SpaceLocationFlags::POSITION_VALID) {
+            match floor_cal.add_sample(location.pose.position.y) {
+                Ok(Some(adjustment)) => {
+                    let _ = msg_tx.send(CalibrationMessage::FloorComplete {
+                        height_adjustment: adjustment,
+                    });
+                    break;
+                }
+                Ok(None) => {
+                    let (collected, total) = floor_cal.progress();
+                    let _ = msg_tx.send(CalibrationMessage::FloorProgress { collected, total });
+                }
+                Err(e) => return Err(StepError::Floor(format!("{e:?}"))),
+            }
+        }
+
+        sleep_until(&mut next_sample_time, sample_interval);
+    }
+    Ok(())
+}
+
+fn handle_recenter<S: MessageSender>(
+    xr_session: Option<&XrSession>,
+    msg_tx: &S,
+) -> Result<(), StepError> {
+    let xr_session = xr_session.ok_or(StepError::NotConnected { action: "recenter" })?;
+
+    let view_space = create_reference_space(&xr_session.session, xr::ReferenceSpaceType::VIEW, "VIEW")?;
+    let stage_space = create_reference_space(&xr_session.session, xr::ReferenceSpaceType::STAGE, "STAGE")?;
+
+    // Countdown after spaces exist, so the HMD pose is captured once the user is in position.
+    for seconds_left in (1..=3).rev() {
+        let _ = msg_tx.send(CalibrationMessage::RecenterCountdown { seconds: seconds_left });
+        std::thread::sleep(Duration::from_secs(1));
+    }
+
+    let time = xr_session.now();
+    let location = view_space.locate(&stage_space, time)
+        .map_err(|e| StepError::Locate { what: "HMD", detail: format!("{e:?}") })?;
+
+    let pos_valid = location.location_flags.contains(xr::SpaceLocationFlags::POSITION_VALID);
+    let ori_valid = location.location_flags.contains(xr::SpaceLocationFlags::ORIENTATION_VALID);
+    if !pos_valid || !ori_valid {
+        return Err(StepError::HmdPoseInvalid { pos_valid, ori_valid });
+    }
+
+    let position = [
+        location.pose.position.x,
+        location.pose.position.y,
+        location.pose.position.z,
+    ];
+    let orientation = [
+        location.pose.orientation.x,
+        location.pose.orientation.y,
+        location.pose.orientation.z,
+        location.pose.orientation.w,
+    ];
+
+    let _ = msg_tx.send(CalibrationMessage::RecenterComplete { position, orientation });
+    Ok(())
 }

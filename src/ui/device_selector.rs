@@ -1,7 +1,7 @@
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_field_names)]
 pub struct Device {
     pub name: String,
-    /// Unique ID. Important for Vive trackers which share the same name.
     pub serial: String,
     pub description: String,
     pub category: String,
@@ -13,7 +13,6 @@ pub struct Device {
 
 impl PartialEq for Device {
     fn eq(&self, other: &Self) -> bool {
-        // Battery state doesn't affect device identity
         self.name == other.name
             && self.serial == other.serial
             && self.category == other.category
@@ -43,10 +42,10 @@ impl Device {
     }
 
     pub fn unique_id(&self) -> &str {
-        if !self.serial.is_empty() {
-            &self.serial
-        } else {
+        if self.serial.is_empty() {
             &self.name
+        } else {
+            &self.serial
         }
     }
 }

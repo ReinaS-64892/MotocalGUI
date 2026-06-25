@@ -1,6 +1,6 @@
 # Maintainer: 99oblivius <projects at oblivius dot dev>
 pkgname=spacecal-for-monado
-pkgver=1.0.0
+pkgver=1.1.0
 pkgrel=1
 pkgdesc="VR Tracking Space Calibrator for Monado/WiVRn"
 arch=('x86_64' 'aarch64')

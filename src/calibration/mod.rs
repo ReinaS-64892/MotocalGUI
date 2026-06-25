@@ -4,7 +4,6 @@ pub mod transform;
 
 pub use transform::TransformD;
 
-/// Commands from the UI thread to the XR background thread.
 #[derive(Debug, Clone)]
 pub enum CalibrationCommand {
     StartSampled {
@@ -29,7 +28,6 @@ pub struct DeviceMovement {
     pub intensity: f32,
 }
 
-/// Messages from the XR background thread back to the UI.
 #[derive(Debug, Clone)]
 pub enum CalibrationMessage {
     Countdown { seconds: u32 },
@@ -50,6 +48,6 @@ pub enum CalibrationMessage {
 pub struct CalibrationResult {
     pub transform: TransformD,
     pub target_origin_index: u32,
-    pub median_error_degrees: f32,
-    pub axis_diversity: f32,
+    pub median_error_degrees: f64,
+    pub axis_diversity: f64,
 }

@@ -15,20 +15,17 @@ impl MonadoConnection {
     }
 
     pub fn enumerate_devices(&self) -> Result<Vec<Category>, MonadoError> {
-        // First get all tracking origins
         let origins: Vec<_> = self.monado.tracking_origins()
-            .map_err(|e| MonadoError::EnumerationFailed(format!("{:?}", e)))?
+            .map_err(|e| MonadoError::EnumerationFailed(format!("{e:?}")))?
             .into_iter()
             .collect();
 
-        // Get all devices
         let devices = self.monado.devices()
-            .map_err(|e| MonadoError::EnumerationFailed(format!("{:?}", e)))?;
+            .map_err(|e| MonadoError::EnumerationFailed(format!("{e:?}")))?;
 
         // Group devices by tracking origin
         let mut categories: Vec<Category> = Vec::new();
 
-        // Initialize categories from tracking origins
         for origin in &origins {
             categories.push(Category {
                 index: origin.id,
@@ -37,7 +34,6 @@ impl MonadoConnection {
             });
         }
 
-        // Fallback if no tracking origins found
         if categories.is_empty() {
             categories.push(Category {
                 index: 0,
@@ -46,22 +42,16 @@ impl MonadoConnection {
             });
         }
 
-        // Add each device to its proper tracking origin category
         for device in devices {
-            // Get the tracking origin for this device
             let origin_index = device.get_info_u32(MndProperty::PropertyTrackingOriginU32)
                 .unwrap_or(0);
 
-            // Find the category index for this origin
             let cat_idx = categories.iter()
                 .position(|c| c.index == origin_index)
                 .unwrap_or(0);
 
-            // Get serial number for unique identification
-            // This is crucial for devices like HTC Vive trackers where all have the same name
             let serial = device.serial().unwrap_or_default();
 
-            // Query battery status
             let (battery_charge, battery_charging) = match device.battery_status() {
                 Ok(status) if status.present => (Some(status.charge), status.charging),
                 _ => (None, false),
@@ -85,13 +75,12 @@ impl MonadoConnection {
 
     pub fn reset_tracking_origin(&self, origin_index: u32) -> Result<(), MonadoError> {
         let origins = self.monado.tracking_origins()
-            .map_err(|e| MonadoError::TrackingOriginFailed(format!("{:?}", e)))?;
+            .map_err(|e| MonadoError::TrackingOriginFailed(format!("{e:?}")))?;
 
         let origin = origins.into_iter()
             .find(|o| o.id == origin_index)
             .ok_or(MonadoError::InvalidDeviceId(origin_index))?;
 
-        // Set to identity pose
         let identity_pose = Pose {
             position: mint::Vector3 { x: 0.0, y: 0.0, z: 0.0 },
             orientation: mint::Quaternion {
@@ -101,37 +90,34 @@ impl MonadoConnection {
         };
 
         origin.set_offset(identity_pose)
-            .map_err(|e| MonadoError::ApplyOffsetFailed(format!("{:?}", e)))
+            .map_err(|e| MonadoError::ApplyOffsetFailed(format!("{e:?}")))
     }
 
-    /// Compose a new calibration offset with the existing one (like motoc).
     pub fn apply_offset(&self, origin_index: u32, position: [f64; 3], orientation: [f64; 4]) -> Result<(), MonadoError> {
         use crate::calibration::TransformD;
         use nalgebra::{UnitQuaternion, Quaternion, Vector3};
 
         let origins = self.monado.tracking_origins()
-            .map_err(|e| MonadoError::TrackingOriginFailed(format!("{:?}", e)))?;
+            .map_err(|e| MonadoError::TrackingOriginFailed(format!("{e:?}")))?;
 
         let origin = origins.into_iter()
             .find(|o| o.id == origin_index)
             .ok_or(MonadoError::InvalidDeviceId(origin_index))?;
 
-        // Get current offset from origin
         let current_offset = origin.get_offset()
-            .map_err(|e| MonadoError::TrackingOriginFailed(format!("{:?}", e)))?;
+            .map_err(|e| MonadoError::TrackingOriginFailed(format!("{e:?}")))?;
 
-        // Convert current offset to TransformD
         let current = TransformD::from_position_orientation(
             Vector3::new(
-                current_offset.position.x as f64,
-                current_offset.position.y as f64,
-                current_offset.position.z as f64,
+                f64::from(current_offset.position.x),
+                f64::from(current_offset.position.y),
+                f64::from(current_offset.position.z),
             ),
             UnitQuaternion::from_quaternion(Quaternion::new(
-                current_offset.orientation.s as f64,
-                current_offset.orientation.v.x as f64,
-                current_offset.orientation.v.y as f64,
-                current_offset.orientation.v.z as f64,
+                f64::from(current_offset.orientation.s),
+                f64::from(current_offset.orientation.v.x),
+                f64::from(current_offset.orientation.v.y),
+                f64::from(current_offset.orientation.v.z),
             )),
         );
 
@@ -146,10 +132,8 @@ impl MonadoConnection {
             )),
         );
 
-        // Compose: full_offset = new_offset * current (like motoc)
         let full_offset = new_offset.mul(&current);
 
-        // Convert back to Pose
         let pose = Pose {
             position: mint::Vector3 {
                 x: full_offset.origin.x as f32,
@@ -167,37 +151,37 @@ impl MonadoConnection {
         };
 
         origin.set_offset(pose)
-            .map_err(|e| MonadoError::ApplyOffsetFailed(format!("{:?}", e)))
+            .map_err(|e| MonadoError::ApplyOffsetFailed(format!("{e:?}")))
     }
 
-    /// STAGE offset for world-frame transform (like motoc).
+    // STAGE offset for world-frame transform.
     pub fn get_stage_offset(&self) -> Result<([f64; 3], [f64; 4]), MonadoError> {
         let offset = self.monado.get_reference_space_offset(libmonado::ReferenceSpaceType::Stage)
-            .map_err(|e| MonadoError::TrackingOriginFailed(format!("{:?}", e)))?;
+            .map_err(|e| MonadoError::TrackingOriginFailed(format!("{e:?}")))?;
 
         let position = [
-            offset.position.x as f64,
-            offset.position.y as f64,
-            offset.position.z as f64,
+            f64::from(offset.position.x),
+            f64::from(offset.position.y),
+            f64::from(offset.position.z),
         ];
         let orientation = [
-            offset.orientation.v.x as f64,  // x
-            offset.orientation.v.y as f64,  // y
-            offset.orientation.v.z as f64,  // z
-            offset.orientation.s as f64,    // w
+            f64::from(offset.orientation.v.x),
+            f64::from(offset.orientation.v.y),
+            f64::from(offset.orientation.v.z),
+            f64::from(offset.orientation.s),
         ];
 
         Ok((position, orientation))
     }
 
-    /// Set floor level. Converts from STAGE to native coords for idempotency.
+    // Set floor level. Converts from STAGE to native coords for idempotency.
     pub fn set_floor_absolute(&self, measured_floor_y: f64) -> Result<(), MonadoError> {
         let current = self.monado.get_reference_space_offset(libmonado::ReferenceSpaceType::Stage)
-            .map_err(|e| MonadoError::TrackingOriginFailed(format!("{:?}", e)))?;
+            .map_err(|e| MonadoError::TrackingOriginFailed(format!("{e:?}")))?;
 
         // Convert measured floor (in STAGE coords) to native coords
         // native = stage + offset, so native_floor = measured + current_offset
-        let floor_in_native = measured_floor_y + current.position.y as f64;
+        let floor_in_native = measured_floor_y + f64::from(current.position.y);
 
         let pose = Pose {
             position: mint::Vector3 {
@@ -209,12 +193,12 @@ impl MonadoConnection {
         };
 
         self.monado.set_reference_space_offset(libmonado::ReferenceSpaceType::Stage, pose)
-            .map_err(|e| MonadoError::ApplyOffsetFailed(format!("{:?}", e)))
+            .map_err(|e| MonadoError::ApplyOffsetFailed(format!("{e:?}")))
     }
 
     pub fn reset_floor(&self) -> Result<(), MonadoError> {
         let current = self.monado.get_reference_space_offset(libmonado::ReferenceSpaceType::Stage)
-            .map_err(|e| MonadoError::TrackingOriginFailed(format!("{:?}", e)))?;
+            .map_err(|e| MonadoError::TrackingOriginFailed(format!("{e:?}")))?;
 
         let pose = Pose {
             position: mint::Vector3 {
@@ -226,46 +210,44 @@ impl MonadoConnection {
         };
 
         self.monado.set_reference_space_offset(libmonado::ReferenceSpaceType::Stage, pose)
-            .map_err(|e| MonadoError::ApplyOffsetFailed(format!("{:?}", e)))
+            .map_err(|e| MonadoError::ApplyOffsetFailed(format!("{e:?}")))
     }
 
-    /// Recenter STAGE origin to current HMD position/heading, preserving floor Y.
+    // Recenter STAGE origin to current HMD position/heading, preserving floor Y.
     pub fn apply_recenter_absolute(&self, hmd_position: [f32; 3], hmd_orientation: [f32; 4]) -> Result<(), MonadoError> {
         use nalgebra::{Rotation3, UnitQuaternion, Quaternion, Vector3};
 
         // Get current STAGE offset
         let current_pose = self.monado.get_reference_space_offset(libmonado::ReferenceSpaceType::Stage)
-            .map_err(|e| MonadoError::TrackingOriginFailed(format!("{:?}", e)))?;
+            .map_err(|e| MonadoError::TrackingOriginFailed(format!("{e:?}")))?;
 
         let current_trans = Vector3::new(
-            current_pose.position.x as f64,
-            current_pose.position.y as f64,
-            current_pose.position.z as f64,
+            f64::from(current_pose.position.x),
+            f64::from(current_pose.position.y),
+            f64::from(current_pose.position.z),
         );
         let current_rot = UnitQuaternion::from_quaternion(Quaternion::new(
-            current_pose.orientation.s as f64,
-            current_pose.orientation.v.x as f64,
-            current_pose.orientation.v.y as f64,
-            current_pose.orientation.v.z as f64,
+            f64::from(current_pose.orientation.s),
+            f64::from(current_pose.orientation.v.x),
+            f64::from(current_pose.orientation.v.y),
+            f64::from(current_pose.orientation.v.z),
         ));
 
         // HMD pose in current STAGE coords
         let stage_hmd_pos = Vector3::new(
-            hmd_position[0] as f64,
-            hmd_position[1] as f64,
-            hmd_position[2] as f64,
+            f64::from(hmd_position[0]),
+            f64::from(hmd_position[1]),
+            f64::from(hmd_position[2]),
         );
         let stage_hmd_ori = UnitQuaternion::from_quaternion(Quaternion::new(
-            hmd_orientation[3] as f64,  // w
-            hmd_orientation[0] as f64,  // x
-            hmd_orientation[1] as f64,  // y
-            hmd_orientation[2] as f64,  // z
+            f64::from(hmd_orientation[3]),  // w
+            f64::from(hmd_orientation[0]),  // x
+            f64::from(hmd_orientation[1]),  // y
+            f64::from(hmd_orientation[2]),  // z
         ));
 
         // Convert HMD pose from STAGE to native coords
         // If offset represents: native = offset * stage (i.e., stage = offset^-1 * native)
-        // Then: native_pos = offset_rot * stage_pos + offset_trans
-        //       native_ori = offset_rot * stage_ori
         let native_hmd_pos = current_rot * stage_hmd_pos + current_trans;
         let native_hmd_ori = current_rot * stage_hmd_ori;
 
@@ -314,14 +296,13 @@ impl MonadoConnection {
         };
 
         self.monado.set_reference_space_offset(libmonado::ReferenceSpaceType::Stage, pose)
-            .map_err(|e| MonadoError::ApplyOffsetFailed(format!("{:?}", e)))
+            .map_err(|e| MonadoError::ApplyOffsetFailed(format!("{e:?}")))
     }
 
     pub fn refresh_batteries(&self, categories: &mut [Category]) -> Result<(), MonadoError> {
         let devices = self.monado.devices()
-            .map_err(|e| MonadoError::EnumerationFailed(format!("{:?}", e)))?;
+            .map_err(|e| MonadoError::EnumerationFailed(format!("{e:?}")))?;
 
-        // Build a lookup from device index to battery status
         let mut battery_map = std::collections::HashMap::new();
         for device in devices {
             if let Ok(status) = device.battery_status()
@@ -331,9 +312,8 @@ impl MonadoConnection {
             }
         }
 
-        // Update categories in place
         for cat in categories.iter_mut() {
-            for dev in cat.devices.iter_mut() {
+            for dev in &mut cat.devices {
                 if let Some(&(charge, charging)) = battery_map.get(&dev.device_index) {
                     dev.battery_charge = Some(charge);
                     dev.battery_charging = charging;
@@ -347,17 +327,17 @@ impl MonadoConnection {
         Ok(())
     }
 
-    /// Reset horizontal position and yaw, preserving floor Y.
+    // Reset horizontal position and yaw, preserving floor Y.
     pub fn reset_center(&self) -> Result<(), MonadoError> {
         let current = self.monado.get_reference_space_offset(libmonado::ReferenceSpaceType::Stage)
-            .map_err(|e| MonadoError::TrackingOriginFailed(format!("{:?}", e)))?;
+            .map_err(|e| MonadoError::TrackingOriginFailed(format!("{e:?}")))?;
 
         // Reset X, Z position and rotation to identity, preserve Y (floor)
         let pose = Pose {
             position: mint::Vector3 {
-                x: 0.0,  // Reset X
-                y: current.position.y,  // Keep floor Y
-                z: 0.0,  // Reset Z
+                x: 0.0,
+                y: current.position.y,
+                z: 0.0,
             },
             orientation: mint::Quaternion {
                 v: mint::Vector3 { x: 0.0, y: 0.0, z: 0.0 },
@@ -366,7 +346,7 @@ impl MonadoConnection {
         };
 
         self.monado.set_reference_space_offset(libmonado::ReferenceSpaceType::Stage, pose)
-            .map_err(|e| MonadoError::ApplyOffsetFailed(format!("{:?}", e)))
+            .map_err(|e| MonadoError::ApplyOffsetFailed(format!("{e:?}")))
     }
 }
 
@@ -375,10 +355,7 @@ pub fn try_connect() -> Option<MonadoConnection> {
 }
 
 pub fn enumerate_devices() -> Vec<Category> {
-    match try_connect() {
-        Some(conn) => conn.enumerate_devices().unwrap_or_default(),
-        None => Vec::new(),
-    }
+    try_connect().map_or_else(Vec::new, |conn| conn.enumerate_devices().unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -387,10 +364,9 @@ mod tests {
 
     #[test]
     fn test_connect() {
-        // This test requires Monado to be running
         match MonadoConnection::connect() {
             Ok(_conn) => println!("Successfully connected to Monado"),
-            Err(e) => println!("Failed to connect to Monado: {}", e),
+            Err(e) => println!("Failed to connect to Monado: {e}"),
         }
     }
 
@@ -407,7 +383,7 @@ mod tests {
                         }
                     }
                 }
-                Err(e) => println!("Failed to enumerate devices: {}", e),
+                Err(e) => println!("Failed to enumerate devices: {e}"),
             }
         } else {
             println!("Could not connect to Monado");
