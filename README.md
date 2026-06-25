@@ -84,8 +84,9 @@ sudo make PREFIX=/usr install
 
 ## Acknowledgments
 
-- [motoc](https://github.com/galister/motoc) by galister — early feasibility studies and Monado integration approach
 - [OpenVR-SpaceCalibrator](https://github.com/pushrax/OpenVR-SpaceCalibrator) by pushrax — original calibration framework concept
+- [motoc](https://github.com/galister/motoc) by galister — early feasibility studies and Monado integration approach
+- Proof of concept was developed with Claude Opus 4.7
 
 ## License
 
