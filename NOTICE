@@ -1,4 +1,8 @@
-SpaceCal for Monado
+MotocalGUI
+
+A hard fork of SpaceCal for Monado:
+https://github.com/99oblivius/spacecal-for-monado
+
 Copyright (C) 2026 99oblivius
 
 Calibration and OpenXR initialization use libmotoc from:

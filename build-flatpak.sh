@@ -4,11 +4,11 @@ set -e
 cd "$(dirname "$0")/flatpak"
 
 echo "Building flatpak..."
-flatpak-builder --repo=repo --force-clean build dev.oblivius.spacecal-for-monado.yml
+flatpak-builder --repo=repo --force-clean build io.github.ReinaS_64892.MotocalGUI.yml
 
 echo "Creating bundle..."
-flatpak build-bundle repo spacecal-for-monado.flatpak dev.oblivius.spacecal-for-monado \
+flatpak build-bundle repo motocalgui.flatpak io.github.ReinaS_64892.MotocalGUI \
     --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo
 
-mv spacecal-for-monado.flatpak ..
-echo "Done: spacecal-for-monado.flatpak"
+mv motocalgui.flatpak ..
+echo "Done: motocalgui.flatpak"

@@ -33,7 +33,7 @@ impl Config {
     pub fn path() -> std::path::PathBuf {
         dirs::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("spacecal-for-monado")
+            .join("motocalgui")
             .join("config.json")
     }
 

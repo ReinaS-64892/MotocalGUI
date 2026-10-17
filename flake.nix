@@ -35,7 +35,7 @@
             makeWrapper
           ];
           postInstall = ''
-            wrapProgram $out/bin/spacecal-for-monado \
+            wrapProgram $out/bin/motocalgui \
               --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath [pkgs.openxr-loader]}" \
               --prefix LD_LIBRARY_PATH : "/run/opengl-driver/lib" \
               --run '
@@ -49,9 +49,9 @@
                 fi
               '
 
-            install -Dm644 data/dev.oblivius.spacecal-for-monado.desktop $out/share/applications/dev.oblivius.spacecal-for-monado.desktop
-            install -Dm644 data/dev.oblivius.spacecal-for-monado.svg $out/share/icons/hicolor/scalable/apps/dev.oblivius.spacecal-for-monado.svg
-            install -Dm644 data/dev.oblivius.spacecal-for-monado.metainfo.xml $out/share/metainfo/dev.oblivius.spacecal-for-monado.metainfo.xml
+            install -Dm644 data/io.github.ReinaS_64892.MotocalGUI.desktop $out/share/applications/io.github.ReinaS_64892.MotocalGUI.desktop
+            install -Dm644 data/io.github.ReinaS_64892.MotocalGUI.svg $out/share/icons/hicolor/scalable/apps/io.github.ReinaS_64892.MotocalGUI.svg
+            install -Dm644 data/io.github.ReinaS_64892.MotocalGUI.metainfo.xml $out/share/metainfo/io.github.ReinaS_64892.MotocalGUI.metainfo.xml
           '';
         };
 

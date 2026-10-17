@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
-Name=SpaceCal for Monado
+Name=MotocalGUI
 Comment=VR Tracking Space Calibrator for Monado/WiVRn
-Exec=spacecal-for-monado
-Icon=dev.oblivius.spacecal-for-monado
+Exec=motocalgui
+Icon=io.github.ReinaS_64892.MotocalGUI
 Categories=Utility;Settings;
 Keywords=vr;monado;wivrn;calibration;tracking;space;
 Terminal=false

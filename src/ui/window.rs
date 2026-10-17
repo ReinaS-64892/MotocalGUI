@@ -180,7 +180,7 @@ pub fn build_ui(app: &adw::Application) {
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
-        .title("SpaceCal for Monado")
+        .title("MotocalGUI")
         .default_width(800)
         .default_height(630)
         .build();
@@ -214,7 +214,7 @@ pub fn build_ui(app: &adw::Application) {
     overlay.set_measure_overlay(&toolbar_view, true);
 
     let header_bar = adw::HeaderBar::new();
-    header_bar.set_title_widget(Some(&Label::new(Some("SpaceCal for Monado"))));
+    header_bar.set_title_widget(Some(&Label::new(Some("MotocalGUI"))));
     header_bar.set_decoration_layout(Some(":close"));
     toolbar_view.add_top_bar(&header_bar);
 

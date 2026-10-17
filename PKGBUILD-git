@@ -1,17 +1,17 @@
-# Maintainer: 99oblivius <projects at oblivius dot dev>
-pkgname=spacecal-for-monado-git
+# Packaging for MotocalGUI, a hard fork of SpaceCal for Monado.
+pkgname=motocalgui-git
 pkgver=r10.5cf90d9
 pkgrel=1
-pkgdesc="VR Tracking Space Calibrator for Monado/WiVRn (git version)"
+pkgdesc="GTK4 frontend for libmotoc (Monado/WiVRn calibration) (git version)"
 arch=('x86_64' 'aarch64')
-url="https://github.com/99oblivius/spacecal-for-monado"
+url="https://github.com/ReinaS-64892/MotocalGUI"
 license=('GPL-3.0-only')
 depends=('gtk4' 'libadwaita' 'openxr' 'monado')
 makedepends=('cargo' 'git')
 optdepends=('libcanberra: audio feedback during calibration')
-provides=('spacecal-for-monado')
-conflicts=('spacecal-for-monado')
-source=("git+$url.git")
+provides=('motocalgui')
+conflicts=('motocalgui')
+source=("motocalgui::git+$url.git")
 sha256sums=('SKIP')
 
 pkgver() {

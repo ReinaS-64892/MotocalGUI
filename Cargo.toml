@@ -1,19 +1,19 @@
 [package]
-name = "spacecal-for-monado"
+name = "motocalgui"
 version = "1.1.0"
 edition = "2024"
-description = "VR tracking space calibrator for Monado"
-repository = "https://github.com/99oblivius/spacecal-for-monado"
+description = "GTK4 frontend for libmotoc, the Monado tracking origin calibrator"
+repository = "https://github.com/ReinaS-64892/MotocalGUI"
 license = "GPL-3.0-only"
 keywords = ["vr", "monado", "wivrn", "calibration", "tracking"]
 categories = ["gui"]
 
 [lib]
-name = "spacecal_for_monado"
+name = "motocalgui"
 path = "src/lib.rs"
 
 [[bin]]
-name = "spacecal-for-monado"
+name = "motocalgui"
 path = "src/main.rs"
 
 [dependencies]
@@ -34,22 +34,22 @@ futures-util = "0.3"
 section = "utils"
 depends = "libgtk-4-1 (>= 4.12), libadwaita-1-0 (>= 1.5), libopenxr-loader1, monado-service"
 assets = [
-    ["target/release/spacecal-for-monado", "usr/bin/", "755"],
-    ["data/dev.oblivius.spacecal-for-monado.desktop", "usr/share/applications/", "644"],
-    ["data/dev.oblivius.spacecal-for-monado.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
-    ["data/dev.oblivius.spacecal-for-monado.metainfo.xml", "usr/share/metainfo/", "644"],
-    ["LICENSE", "usr/share/doc/spacecal-for-monado/", "644"],
-    ["NOTICE", "usr/share/doc/spacecal-for-monado/", "644"],
+    ["target/release/motocalgui", "usr/bin/", "755"],
+    ["data/io.github.ReinaS_64892.MotocalGUI.desktop", "usr/share/applications/", "644"],
+    ["data/io.github.ReinaS_64892.MotocalGUI.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    ["data/io.github.ReinaS_64892.MotocalGUI.metainfo.xml", "usr/share/metainfo/", "644"],
+    ["LICENSE", "usr/share/doc/motocalgui/", "644"],
+    ["NOTICE", "usr/share/doc/motocalgui/", "644"],
 ]
 
 [package.metadata.generate-rpm]
 assets = [
-    { source = "target/release/spacecal-for-monado", dest = "/usr/bin/spacecal-for-monado", mode = "755" },
-    { source = "data/dev.oblivius.spacecal-for-monado.desktop", dest = "/usr/share/applications/dev.oblivius.spacecal-for-monado.desktop", mode = "644" },
-    { source = "data/dev.oblivius.spacecal-for-monado.svg", dest = "/usr/share/icons/hicolor/scalable/apps/dev.oblivius.spacecal-for-monado.svg", mode = "644" },
-    { source = "data/dev.oblivius.spacecal-for-monado.metainfo.xml", dest = "/usr/share/metainfo/dev.oblivius.spacecal-for-monado.metainfo.xml", mode = "644" },
-    { source = "LICENSE", dest = "/usr/share/licenses/spacecal-for-monado/LICENSE", mode = "644" },
-    { source = "NOTICE", dest = "/usr/share/licenses/spacecal-for-monado/NOTICE", mode = "644" },
+    { source = "target/release/motocalgui", dest = "/usr/bin/motocalgui", mode = "755" },
+    { source = "data/io.github.ReinaS_64892.MotocalGUI.desktop", dest = "/usr/share/applications/io.github.ReinaS_64892.MotocalGUI.desktop", mode = "644" },
+    { source = "data/io.github.ReinaS_64892.MotocalGUI.svg", dest = "/usr/share/icons/hicolor/scalable/apps/io.github.ReinaS_64892.MotocalGUI.svg", mode = "644" },
+    { source = "data/io.github.ReinaS_64892.MotocalGUI.metainfo.xml", dest = "/usr/share/metainfo/io.github.ReinaS_64892.MotocalGUI.metainfo.xml", mode = "644" },
+    { source = "LICENSE", dest = "/usr/share/licenses/motocalgui/LICENSE", mode = "644" },
+    { source = "NOTICE", dest = "/usr/share/licenses/motocalgui/NOTICE", mode = "644" },
 ]
 
 [package.metadata.generate-rpm.requires]

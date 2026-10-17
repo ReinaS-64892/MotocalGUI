@@ -6,8 +6,8 @@ ICONSDIR = $(DATADIR)/icons/hicolor/scalable/apps
 METAINFODIR = $(DATADIR)/metainfo
 LICENSEDIR = $(DATADIR)/licenses
 
-APP_ID = dev.oblivius.spacecal-for-monado
-BIN_NAME = spacecal-for-monado
+APP_ID = io.github.ReinaS_64892.MotocalGUI
+BIN_NAME = motocalgui
 
 .PHONY: all build install install-user uninstall uninstall-user clean
 

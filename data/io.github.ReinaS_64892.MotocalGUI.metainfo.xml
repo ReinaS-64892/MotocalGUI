@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>dev.oblivius.spacecal-for-monado</id>
-  <name>SpaceCal for Monado</name>
+  <id>io.github.ReinaS_64892.MotocalGUI</id>
+  <name>MotocalGUI</name>
   <summary>VR Tracking Space Calibrator for Monado/WiVRn</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-only</project_license>
@@ -21,11 +21,11 @@
       <li>Persistent device selection across sessions</li>
     </ul>
   </description>
-  <launchable type="desktop-id">dev.oblivius.spacecal-for-monado.desktop</launchable>
-  <url type="homepage">https://github.com/99oblivius/spacecal-for-monado</url>
-  <url type="bugtracker">https://github.com/99oblivius/spacecal-for-monado/issues</url>
-  <developer id="dev.oblivius">
-    <name>99oblivius</name>
+  <launchable type="desktop-id">io.github.ReinaS_64892.MotocalGUI.desktop</launchable>
+  <url type="homepage">https://github.com/ReinaS-64892/MotocalGUI</url>
+  <url type="bugtracker">https://github.com/ReinaS-64892/MotocalGUI/issues</url>
+  <developer id="io.github.reinas-64892">
+    <name>ReinaS-64892</name>
   </developer>
   <content_rating type="oars-1.1" />
   <releases>

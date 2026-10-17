@@ -1,4 +1,4 @@
-name: Release & AUR Publish
+name: Release
 
 on:
   push:
@@ -12,9 +12,6 @@ jobs:
   build-and-release:
     runs-on: ubuntu-latest
     container: fedora:latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      sha256: ${{ steps.checksum.outputs.sha256 }}
     steps:
       - name: Install system dependencies
         run: |
@@ -52,42 +49,18 @@ jobs:
         id: checksum
         run: |
           VERSION=${{ steps.version.outputs.version }}
-          curl -sL "https://github.com/99oblivius/spacecal-for-monado/archive/refs/tags/v${VERSION}.tar.gz" \
-            -o spacecal-for-monado-${VERSION}.tar.gz
-          SHA=$(sha256sum spacecal-for-monado-${VERSION}.tar.gz | cut -d' ' -f1)
+          curl -sL "https://github.com/${{ github.repository }}/archive/refs/tags/v${VERSION}.tar.gz" \
+            -o motocalgui-${VERSION}.tar.gz
+          SHA=$(sha256sum motocalgui-${VERSION}.tar.gz | cut -d' ' -f1)
           echo "sha256=${SHA}" >> "$GITHUB_OUTPUT"
-          echo "${SHA}  spacecal-for-monado-${VERSION}.tar.gz" > SHA256SUMS
+          echo "${SHA}  motocalgui-${VERSION}.tar.gz" > SHA256SUMS
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: |
-            spacecal-for-monado-${{ steps.version.outputs.version }}.tar.gz
+            motocalgui-${{ steps.version.outputs.version }}.tar.gz
             SHA256SUMS
             target/debian/*.deb
             target/generate-rpm/*.rpm
-
-  publish-aur-release:
-    needs: build-and-release
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Generate PKGBUILD
-        env:
-          VERSION: ${{ needs.build-and-release.outputs.version }}
-          SHA256: ${{ needs.build-and-release.outputs.sha256 }}
-        run: |
-          sed -i "s/pkgver=.*/pkgver=${VERSION}/; s/sha256sums=.*/sha256sums=('${SHA256}')/" \
-            PKGBUILD
-
-      - name: Publish to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v3.0.1
-        with:
-          pkgname: spacecal-for-monado
-          pkgbuild: PKGBUILD
-          commit_username: 99oblivius
-          commit_email: projects@oblivius.dev
-          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
-          commit_message: "Update to ${{ needs.build-and-release.outputs.version }}"
