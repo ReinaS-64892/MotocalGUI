@@ -1,7 +1,9 @@
-use serde::{Deserialize, Serialize};
 use crate::error::ConfigError;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+// UI preferences only. Calibration profiles are owned by libmotoc in its
+// motoc config directory and must never be serialized into this file.
 pub struct Config {
     pub source: String,
     pub target: String,
@@ -13,6 +15,17 @@ pub struct Config {
 
 const fn default_sample_count() -> u32 {
     400
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            source: String::new(),
+            target: String::new(),
+            hide_calibration_help: false,
+            sample_count: default_sample_count(),
+        }
+    }
 }
 
 impl Config {
@@ -56,5 +69,17 @@ impl Config {
         std::fs::write(&path, content)
             .map_err(|e| ConfigError::SaveFailed(format!("Failed to write config file: {e}")))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fresh_and_existing_configs_use_same_sample_count() {
+        let existing: Config = serde_json::from_str(r#"{"source":"", "target":""}"#).unwrap();
+        assert_eq!(Config::default().sample_count, 400);
+        assert_eq!(existing.sample_count, Config::default().sample_count);
     }
 }

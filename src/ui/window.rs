@@ -13,6 +13,7 @@ use std::cell::{Cell, RefCell};
 use futures_util::StreamExt;
 
 use crate::calibration::{CalibrationCommand, CalibrationMessage};
+use crate::monado::ResetTarget;
 use crate::ui::device_list::{DeviceList, PopoverState};
 use crate::ui::state::{SharedState, create_shared_state};
 use crate::xr::xr_event_loop;
@@ -38,45 +39,6 @@ impl ToastManager {
         }
 
         let toast = adw::Toast::new(message);
-        self.current_toast.borrow_mut().replace(toast.clone());
-        self.overlay.add_toast(toast);
-    }
-
-    fn show_calibration_result(&self, confidence: u32, axis_diversity: f64) {
-        if let Some(prev) = self.current_toast.borrow_mut().take() {
-            prev.dismiss();
-        }
-
-        let toast = adw::Toast::new("");
-        toast.set_timeout(0);
-
-        let color = if confidence < 50 {
-            "#a51d2d" // dark red
-        } else if confidence < 75 {
-            "#e01b24" // red
-        } else if confidence < 80 {
-            "#e66100" // orange
-        } else if confidence < 90 {
-            "#c88800" // yellow
-        } else {
-            "#2ec27e" // green
-        };
-
-        let diversity_warning = if axis_diversity < 0.15 {
-            "\n<span color=\"#e01b24\">Motion too linear \u{2014} sweep a wide figure-eight next time</span>"
-        } else if axis_diversity < 0.333 {
-            "\n<span color=\"#e66100\">Limited axis coverage \u{2014} tilt into each curve of the figure-eight</span>"
-        } else {
-            ""
-        };
-
-        let label = Label::new(None);
-        label.set_markup(&format!(
-            "Calibration complete \u{2014} <span color=\"{color}\"><b>{confidence}%</b></span> confidence{diversity_warning}"
-        ));
-        label.set_wrap(true);
-        toast.set_custom_title(Some(&label));
-
         self.current_toast.borrow_mut().replace(toast.clone());
         self.overlay.add_toast(toast);
     }
@@ -367,11 +329,6 @@ pub fn build_ui(app: &adw::Application) {
     calibrate_btn.set_popover(Some(&sample_popover));
     button_box.append(&calibrate_btn);
 
-    let floor_btn = Button::with_label("Floor");
-    floor_btn.set_width_request(90);
-    floor_btn.set_tooltip_text(Some("Set floor height using target device position"));
-    button_box.append(&floor_btn);
-
     let recenter_btn = Button::with_label("Recenter");
     recenter_btn.set_width_request(90);
     recenter_btn.set_tooltip_text(Some("Set STAGE origin to current HMD position and heading"));
@@ -380,20 +337,15 @@ pub fn build_ui(app: &adw::Application) {
     let reset_btn = adw::SplitButton::new();
     reset_btn.set_label("Reset");
     reset_btn.add_css_class("destructive-action");
-    reset_btn.set_tooltip_text(Some("Reset target tracking origin (dropdown for more)"));
-
-
+    reset_btn.set_tooltip_text(Some(
+        "Reset target tracking origin (dropdown for all origins and STAGE/LOCAL)",
+    ));
     let reset_popover = gtk4::Popover::new();
     let reset_list = gtk4::ListBox::new();
     reset_list.set_selection_mode(gtk4::SelectionMode::None);
     reset_list.add_css_class("boxed-list");
-    reset_list.set_margin_start(6);
-    reset_list.set_margin_end(6);
-    reset_list.set_margin_top(6);
-    reset_list.set_margin_bottom(6);
     reset_popover.set_child(Some(&reset_list));
     reset_btn.set_popover(Some(&reset_popover));
-
     button_box.append(&reset_btn);
 
     let status_label = Label::new(None);
@@ -634,7 +586,14 @@ pub fn build_ui(app: &adw::Application) {
                 }
             }
 
-            schedule_poll(state, source_list, target_list, status_label, battery_bar, window_focused);
+            schedule_poll(
+                state,
+                source_list,
+                target_list,
+                status_label,
+                battery_bar,
+                window_focused,
+            );
         });
     }
 
@@ -703,19 +662,15 @@ pub fn build_ui(app: &adw::Application) {
             return;
         };
 
-        let stage_offset = s.connection().and_then(|conn| conn.get_stage_offset().ok());
         let hide_help = s.hide_calibration_help();
         let source_serial = src.unique_id().to_string();
         let target_serial = tgt.unique_id().to_string();
-        let target_origin_index = tgt.category_index;
         drop(s);
 
         let cmd = CalibrationCommand::StartSampled {
             source_serial,
             target_serial,
-            target_origin_index,
             sample_count: sample_count_for_calibrate.get(),
-            stage_offset,
         };
 
         if hide_help {
@@ -744,139 +699,71 @@ pub fn build_ui(app: &adw::Application) {
         }
     });
 
-    let toasts_for_floor = toasts.clone();
-    let cmd_tx_floor = Rc::clone(&cmd_tx);
-    let state_for_floor = Rc::clone(&state);
-    floor_btn.connect_clicked(move |btn| {
-        let target_serial = {
-            let s = state_for_floor.borrow();
-            if let Some(dev) = s.selected_target() { dev.unique_id().to_string() } else {
-                toasts_for_floor
-                    .show("Select a target device first, then place it on the floor");
-                return;
-            }
-        };
-
-        if let Err(e) = cmd_tx_floor.send(CalibrationCommand::CalibrateFloor { target_serial }) {
-            toasts_for_floor.show(&format!("Failed to start floor calibration: {e}"));
-            return;
-        }
-
-        btn.set_label("Detecting...");
-        btn.set_sensitive(false);
-    });
-
     let toasts_for_reset = toasts.clone();
     let state_for_reset = Rc::clone(&state);
+    let cmd_tx_reset = Rc::clone(&cmd_tx);
     reset_btn.connect_clicked(move |_| {
-        let s = state_for_reset.borrow();
-        let tgt = s.selected_target();
-
-        if let Some(device) = tgt {
-            if let Some(conn) = s.connection() {
-                match conn.reset_tracking_origin(device.category_index) {
-                    Ok(()) => toasts_for_reset.show(&format!("Reset {}", device.category)),
-                    Err(e) => toasts_for_reset.show(&format!("Reset failed: {e}")),
-                }
-            } else {
-                toasts_for_reset.show("Not connected to Monado");
-            }
-        } else {
+        let state = state_for_reset.borrow();
+        let Some(target) = state.selected_target() else {
             toasts_for_reset.show("Select a target device first");
+            return;
+        };
+        if let Err(error) = cmd_tx_reset.send(CalibrationCommand::Reset {
+            target: ResetTarget::TrackingOrigin(target.category_index),
+            label: target.category.clone(),
+        }) {
+            toasts_for_reset.show(&format!("Failed to reset: {error}"));
         }
     });
 
-    let state_for_reset_popover = Rc::clone(&state);
-    let reset_list_for_show = reset_list.clone();
+    // Keep each row's actual origin ID; IDs need not equal menu positions.
+    let reset_targets = Rc::new(RefCell::new(Vec::new()));
+    let targets_for_show = Rc::clone(&reset_targets);
+    let state_for_reset_show = Rc::clone(&state);
+    let list_for_reset_show = reset_list.clone();
     reset_popover.connect_show(move |_| {
-        while let Some(row) = reset_list_for_show.first_child() {
-            reset_list_for_show.remove(&row);
+        while let Some(row) = list_for_reset_show.first_child() {
+            list_for_reset_show.remove(&row);
         }
-
-        let s = state_for_reset_popover.borrow();
-        let categories = s.categories();
-
-        for category in categories {
+        let state = state_for_reset_show.borrow();
+        let mut targets = targets_for_show.borrow_mut();
+        targets.clear();
+        targets.extend(state.categories().iter().map(|category| {
+            (
+                category.name.clone(),
+                ResetTarget::TrackingOrigin(category.index),
+            )
+        }));
+        targets.extend([
+            ("STAGE Space".into(), ResetTarget::Stage),
+            ("LOCAL Space".into(), ResetTarget::Local),
+        ]);
+        for (name, _) in targets.iter() {
             let row = gtk4::ListBoxRow::new();
-            let label = Label::new(Some(&category.name));
+            let label = Label::new(Some(name));
             label.set_xalign(0.0);
             label.set_margin_start(12);
             label.set_margin_end(12);
             label.set_margin_top(8);
             label.set_margin_bottom(8);
             row.set_child(Some(&label));
-            reset_list_for_show.append(&row);
+            list_for_reset_show.append(&row);
         }
-
-        let sep = gtk4::Separator::new(Orientation::Horizontal);
-        let sep_row = gtk4::ListBoxRow::new();
-        sep_row.set_child(Some(&sep));
-        sep_row.set_selectable(false);
-        sep_row.set_activatable(false);
-        reset_list_for_show.append(&sep_row);
-
-        let floor_row = gtk4::ListBoxRow::new();
-        let floor_label = Label::new(Some("Floor Level"));
-        floor_label.set_xalign(0.0);
-        floor_label.set_margin_start(12);
-        floor_label.set_margin_end(12);
-        floor_label.set_margin_top(8);
-        floor_label.set_margin_bottom(8);
-        floor_row.set_child(Some(&floor_label));
-        reset_list_for_show.append(&floor_row);
-
-        let center_row = gtk4::ListBoxRow::new();
-        let center_label = Label::new(Some("Center"));
-        center_label.set_xalign(0.0);
-        center_label.set_margin_start(12);
-        center_label.set_margin_end(12);
-        center_label.set_margin_top(8);
-        center_label.set_margin_bottom(8);
-        center_row.set_child(Some(&center_label));
-        reset_list_for_show.append(&center_row);
     });
 
-    let state_for_reset_list = Rc::clone(&state);
+    let cmd_tx_reset_list = Rc::clone(&cmd_tx);
     let toasts_for_reset_list = toasts.clone();
-    let reset_popover_for_list = reset_popover;
     reset_list.connect_row_activated(move |_, row| {
-        let index: usize = row.index().try_into().unwrap();
-        let s = state_for_reset_list.borrow();
-        let categories = s.categories();
-        let num_categories = categories.len();
-
-        if index < num_categories {
-            if let Some(category) = categories.get(index) {
-                if let Some(conn) = s.connection() {
-                    match conn.reset_tracking_origin(category.index) {
-                        Ok(()) => toasts_for_reset_list.show(&format!("Reset {}", category.name)),
-                        Err(e) => toasts_for_reset_list.show(&format!("Reset failed: {e}")),
-                    }
-                } else {
-                    toasts_for_reset_list.show("Not connected to Monado");
-                }
-            }
-        } else if index == num_categories + 1 {
-            if let Some(conn) = s.connection() {
-                match conn.reset_floor() {
-                    Ok(()) => toasts_for_reset_list.show("Floor reset"),
-                    Err(e) => toasts_for_reset_list.show(&format!("Reset floor failed: {e}")),
-                }
-            } else {
-                toasts_for_reset_list.show("Not connected to Monado");
-            }
-        } else if index == num_categories + 2 {
-            if let Some(conn) = s.connection() {
-                match conn.reset_center() {
-                    Ok(()) => toasts_for_reset_list.show("Center reset"),
-                    Err(e) => toasts_for_reset_list.show(&format!("Reset center failed: {e}")),
-                }
-            } else {
-                toasts_for_reset_list.show("Not connected to Monado");
-            }
+        if let Ok(index) = usize::try_from(row.index())
+            && let Some((name, target)) = reset_targets.borrow().get(index)
+            && let Err(error) = cmd_tx_reset_list.send(CalibrationCommand::Reset {
+                target: *target,
+                label: name.clone(),
+            })
+        {
+            toasts_for_reset_list.show(&format!("Failed to reset: {error}"));
         }
-
-        reset_popover_for_list.popdown();
+        reset_popover.popdown();
     });
 
     let toasts_for_recenter = toasts.clone();
@@ -898,7 +785,6 @@ pub fn build_ui(app: &adw::Application) {
     });
 
     let calibrate_btn_for_msg = calibrate_btn;
-    let floor_btn_for_msg = floor_btn;
     let recenter_btn_for_msg = recenter_btn;
     let toasts_for_msg = toasts;
     let state_for_msg = Rc::clone(&state);
@@ -938,16 +824,7 @@ pub fn build_ui(app: &adw::Application) {
                     let fraction = f64::from(collected) / f64::from(total);
                     update_progress_fill(&progress_fill_for_msg, &window_for_msg, fraction);
                 }
-                CalibrationMessage::FloorProgress { collected, total } => {
-                    floor_btn_for_msg.set_label(&format!("{collected}/{total}..."));
-                    background_box_for_msg.add_css_class("calibration-bg-active");
-                    countdown_label_for_msg.set_visible(false);
-                    progress_fill_for_msg.set_visible(true);
-                    progress_fill_for_msg.add_css_class("progress-fill-active");
-                    let fraction = f64::from(collected) / f64::from(total);
-                    update_progress_fill(&progress_fill_for_msg, &window_for_msg, fraction);
-                }
-                CalibrationMessage::SampledComplete(result) => {
+                CalibrationMessage::SampledComplete => {
                     calibrate_btn_for_msg.set_label("Calibrate");
                     calibrate_btn_for_msg.set_sensitive(true);
                     restore_idle_visuals(
@@ -957,66 +834,9 @@ pub fn build_ui(app: &adw::Application) {
                     );
                     play_sound("complete");
 
-                    let s = state_for_msg.borrow();
-                    if let Some(conn) = s.connection() {
-                        let position = result.transform.position_f64();
-                        let orientation = result.transform.orientation_f64();
-                        match conn.apply_offset(result.target_origin_index, position, orientation) {
-                            Ok(()) => {
-                                // Confidence = 100 × exp(-0.028 × d^1.6)
-                                // Tuned for typical grip drift of 1-15°:
-                                //   ~1° → 97%,  ~5° → 72%,  ~10° → 34%,  ~15° → 12%
-                                let d = result.median_error_degrees;
-                                let confidence = (100.0 * (-0.028 * d.powf(1.6)).exp()).round() as u32;
-                                toasts_for_msg
-                                    .show_calibration_result(confidence, result.axis_diversity);
-                            }
-                            Err(e) => {
-                                toasts_for_msg.show(&format!("Failed to apply calibration: {e}"));
-                            }
-                        }
-                    } else {
-                        toasts_for_msg.show("Cannot apply calibration: not connected");
-                    }
+                    toasts_for_msg.show("Calibration complete");
                 }
-                CalibrationMessage::FloorComplete { height_adjustment } => {
-                    floor_btn_for_msg.set_label("Floor");
-                    floor_btn_for_msg.set_sensitive(true);
-                    restore_idle_visuals(
-                        &background_box_for_msg,
-                        &countdown_label_for_msg,
-                        &progress_fill_for_msg,
-                    );
-                    play_sound("complete");
-
-                    let measured_floor = f64::from(-height_adjustment);
-
-                    let apply_result = {
-                        let s = state_for_msg.borrow();
-                        s.connection()
-                            .map(|conn| conn.set_floor_absolute(measured_floor))
-                    };
-
-                    match apply_result {
-                        Some(Ok(())) => {
-                            let delta_cm = measured_floor * 100.0;
-                            let direction = if measured_floor >= 0.0 { "up" } else { "down" };
-                            toasts_for_msg.show(&format!(
-                                "Floor set {:.1}cm {}",
-                                delta_cm.abs(),
-                                direction
-                            ));
-                        }
-                        Some(Err(e)) => {
-                            toasts_for_msg.show(&format!("Failed to apply floor: {e}"));
-                        }
-                        None => toasts_for_msg.show("Cannot apply floor: not connected"),
-                    }
-                }
-                CalibrationMessage::RecenterComplete {
-                    position,
-                    orientation,
-                } => {
+                CalibrationMessage::RecenterComplete => {
                     recenter_btn_for_msg.set_label("Recenter");
                     recenter_btn_for_msg.set_sensitive(true);
                     restore_idle_visuals(
@@ -1025,63 +845,17 @@ pub fn build_ui(app: &adw::Application) {
                         &progress_fill_for_msg,
                     );
                     play_sound("complete");
-
-                    let s = state_for_msg.borrow();
-                    if let Some(conn) = s.connection() {
-                        match conn.apply_recenter_absolute(position, orientation) {
-                            Ok(()) => {
-                                let x_cm = position[0] * 100.0;
-                                let z_cm = position[2] * 100.0;
-
-                                let q = orientation;
-                                let yaw = (2.0 * f64::from(q[3] * q[1] + q[0] * q[2]))
-                                    .atan2(1.0 - 2.0 * f64::from(q[1] * q[1] + q[2] * q[2]));
-                                let yaw_deg = yaw.to_degrees();
-
-                                let x_str = if x_cm.abs() < 1.0 {
-                                    String::new()
-                                } else if x_cm > 0.0 {
-                                    format!("{x_cm:.0}cm right")
-                                } else {
-                                    format!("{:.0}cm left", -x_cm)
-                                };
-
-                                let z_str = if z_cm.abs() < 1.0 {
-                                    String::new()
-                                } else if z_cm > 0.0 {
-                                    format!("{z_cm:.0}cm back")
-                                } else {
-                                    format!("{:.0}cm forward", -z_cm)
-                                };
-
-                                let yaw_str = if yaw_deg.abs() < 1.0 {
-                                    String::new()
-                                } else if yaw_deg > 0.0 {
-                                    format!("{yaw_deg:.0}° right")
-                                } else {
-                                    format!("{:.0}° left", -yaw_deg)
-                                };
-
-                                let parts: Vec<&str> =
-                                    [x_str.as_str(), z_str.as_str(), yaw_str.as_str()]
-                                        .into_iter()
-                                        .filter(|s| !s.is_empty())
-                                        .collect();
-
-                                if parts.is_empty() {
-                                    toasts_for_msg.show("Centered");
-                                } else {
-                                    toasts_for_msg
-                                        .show(&format!("Centered ({})", parts.join(", ")));
-                                }
-                            }
-                            Err(e) => {
-                                toasts_for_msg.show(&format!("Failed to apply recenter: {e}"));
-                            }
-                        }
+                    toasts_for_msg.show("Centered");
+                }
+                CalibrationMessage::ResetComplete(label) => {
+                    toasts_for_msg.show(&format!("Reset {label}"));
+                }
+                CalibrationMessage::ProfileRestored { continuous } => {
+                    toasts_for_msg.show(if continuous {
+                        "Saved calibration restored (continuous mode)"
                     } else {
-                        toasts_for_msg.show("Cannot apply recenter: not connected");
-                    }
+                        "Saved calibration restored"
+                    });
                 }
                 CalibrationMessage::MovementUpdate { movements } => {
                     state_for_msg
@@ -1096,8 +870,6 @@ pub fn build_ui(app: &adw::Application) {
                 CalibrationMessage::Error(e) => {
                     calibrate_btn_for_msg.set_label("Calibrate");
                     calibrate_btn_for_msg.set_sensitive(true);
-                    floor_btn_for_msg.set_label("Floor");
-                    floor_btn_for_msg.set_sensitive(true);
                     recenter_btn_for_msg.set_label("Recenter");
                     recenter_btn_for_msg.set_sensitive(true);
                     restore_idle_visuals(

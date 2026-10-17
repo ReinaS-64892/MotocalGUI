@@ -14,8 +14,8 @@
     <ul>
       <li>Select source and target tracking devices from categorized dropdowns</li>
       <li>Sampled calibration with 3-second countdown</li>
-      <li>Floor calibration using target device Y position</li>
-      <li>Recenter forward direction and reset tracking origins</li>
+      <li>Recenter position and forward direction through libmotoc</li>
+      <li>Reset tracking origins and STAGE/LOCAL reference spaces</li>
       <li>Battery status display for all tracked devices</li>
       <li>Movement detection visualization</li>
       <li>Persistent device selection across sessions</li>

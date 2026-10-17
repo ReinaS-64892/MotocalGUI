@@ -15,17 +15,16 @@
   <img src="docs/screenshot-instructions.png" alt="Calibration instructions" width="49%">
 </p>
 
-SpaceCal aligns VR devices from different tracking systems into a single unified space through the Monado OpenXR runtime. Use your Quest headset with lighthouse-tracked controllers, Vive trackers, or any mix of tracking technologies.
+SpaceCal uses [libmotoc](https://docs.rs/libmotoc/0.4.0/libmotoc/) for sampled calibration, tracking-origin corrections, recentering, and OpenXR initialization. SpaceCal aligns VR devices from different tracking systems into a single unified space through the Monado OpenXR runtime. Use your Quest headset with lighthouse-tracked controllers, Vive trackers, or any mix of tracking technologies.
 
 ## Features
 
 - **Calibrate** — grip both devices together, sweep a figure-eight, done. Audio cues and a progress bar guide you through.
-- **Floor** — place a device on the ground and press Floor.
 - **Recenter** — face forward and press Recenter. Floor height is preserved.
+- **Reset** — reset the target tracking origin, any tracking origin from the dropdown, or the entire STAGE/LOCAL reference space (position, orientation, and height).
 - **Device identification** — open a dropdown and move a device to see which one it is.
 - **Battery status** — see charge levels for all your tracked devices.
-- **Reset** — reset individual tracking origins, floor, or center independently.
-- **Confidence scoring** — see how good your calibration was with grip consistency and axis coverage metrics.
+- **Shared calibration** — libmotoc reads and writes motoc’s default `last` profile at `$XDG_CONFIG_HOME/motoc/last.json` (usually `~/.config/motoc/last.json`). The UI restores it on startup and after reconnecting to the runtime; `motoc continue` loads the same file. Continuous profiles created by the CLI resume through libmotoc until a reset, a new calibration, or closing the UI.
 
 ## Installation
 
@@ -76,6 +75,10 @@ sudo make PREFIX=/usr install
 
 ## Usage
 
+Requires a Monado/WiVRn runtime exposing libmonado API 1.6 or later, `XR_MND_headless`, and `XR_MNDX_xdev_space`. Sample progress counts tracked poses; calibration times out after 120 seconds if tracking does not recover. Calibration and recentering offset writes are performed by libmotoc. Explicit resets and restoring saved tracking-origin offsets use libmonado directly, following the motoc CLI implementation. Other direct libmonado access reads device and battery information. Calibration and recentering follow libmotoc’s behavior. Device-based floor calibration and confidence scoring are not provided.
+
+Calibration files are owned entirely by libmotoc, with the same format and profile name as the CLI. Existing profiles are read without being rewritten; a successful new calibration replaces `last.json`. A missing profile is normal on first use; unreadable or invalid profiles are reported without overwriting them. UI-only preferences (device selections, help visibility, and sample count) remain separate at `$XDG_DATA_HOME/spacecal-for-monado/config.json` (usually `~/.local/share/spacecal-for-monado/config.json`). The earlier UI-specific `motoc/spacecal-for-monado.json` profile is not imported automatically.
+
 1. Start your Monado-based runtime (WiVRn, Monado standalone, etc.)
 2. Launch SpaceCal
 3. Select your **source** (reference device) and **target** (device to align)
@@ -85,7 +88,7 @@ sudo make PREFIX=/usr install
 ## Acknowledgments
 
 - [OpenVR-SpaceCalibrator](https://github.com/pushrax/OpenVR-SpaceCalibrator) by pushrax — original calibration framework concept
-- [motoc](https://github.com/galister/motoc) by galister — early feasibility studies and Monado integration approach
+- [motoc](https://github.com/galister/motoc) by galister — calibration and runtime foundation (libmotoc)
 - Proof of concept was developed with Claude Opus 4.7
 
 ## License

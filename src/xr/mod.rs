@@ -1,13 +1,14 @@
-pub mod mndx;
-
-use openxr as xr;
-use std::sync::mpsc;
-use std::ptr;
-use std::time::{Duration, Instant};
-use crate::calibration::{CalibrationCommand, CalibrationMessage, CalibrationResult, DeviceMovement, TransformD};
-use crate::calibration::sampled::{SampleCollector, PoseSample};
-use crate::calibration::floor::FloorCalibrator;
+use crate::calibration::{CalibrationCommand, CalibrationMessage, DeviceMovement};
 use crate::error::XrError;
+use libmonado::DeviceLogic;
+use libmotoc::{
+    Calibrator, CalibratorData, CalibratorStatus, EffectiveSpaceVelocity, OffsetMethod, OffsetType,
+    RecenterMethod, SampledMethod, SavedCalibration, StepResult, TransformD,
+};
+use openxr as xr;
+use openxr_mndx_xdev_space::{SessionXDevExtensionMNDX, XDevList};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 pub trait MessageSender: Send {
     fn send(&self, msg: CalibrationMessage) -> Result<(), String>;
@@ -25,140 +26,80 @@ impl MessageSender for async_channel::Sender<CalibrationMessage> {
     }
 }
 
-pub use mndx::Mndx;
-
-
-const XR_TYPE_GRAPHICS_BINDING_HEADLESS_MND: i32 = 1_000_246_000;
-
-#[repr(C)]
-struct GraphicsBindingHeadlessMND {
-    ty: xr::sys::StructureType,
-    next: *const std::ffi::c_void,
-}
-
-
-struct Headless;
-
-impl xr::Graphics for Headless {
-    type Requirements = ();
-    type SessionCreateInfo = GraphicsBindingHeadlessMND;
-    type Format = i64;
-    type SwapchainImage = ();
-
-    fn raise_format(x: i64) -> Self::Format {
-        x
-    }
-
-    fn lower_format(x: Self::Format) -> i64 {
-        x
-    }
-
-    fn requirements(_instance: &xr::Instance, _system: xr::SystemId) -> xr::Result<Self::Requirements> {
-        Ok(())
-    }
-
-    unsafe fn create_session(
-        instance: &xr::Instance,
-        system: xr::SystemId,
-        info: &Self::SessionCreateInfo,
-    ) -> xr::Result<xr::sys::Session> {
-        let session_create_info = xr::sys::SessionCreateInfo {
-            ty: xr::sys::SessionCreateInfo::TYPE,
-            next: std::ptr::from_ref(info).cast(),
-            create_flags: xr::sys::SessionCreateFlags::EMPTY,
-            system_id: system,
-        };
-
-        let mut session_raw: xr::sys::Session = xr::sys::Session::NULL;
-        // SAFETY: Calling OpenXR FFI function with valid parameters
-        let result = unsafe {
-            (instance.fp().create_session)(
-                instance.as_raw(),
-                &raw const session_create_info,
-                &raw mut session_raw,
-            )
-        };
-
-        if result != xr::sys::Result::SUCCESS {
-            return Err(result);
-        }
-
-        Ok(session_raw)
-    }
-
-    fn enumerate_swapchain_images(_swapchain: &xr::Swapchain<Self>) -> xr::Result<Vec<Self::SwapchainImage>> {
-        // Headless mode doesn't use swapchains
-        Ok(Vec::new())
-    }
-}
-
 pub struct XrSession {
     instance: xr::Instance,
-    session: xr::Session<xr::AnyGraphics>,
-    mndx: Option<Mndx>,
+    session: xr::Session<xr::headless::Headless>,
+    running: bool,
 }
 
 impl XrSession {
     pub fn new() -> Result<Self, XrError> {
-        let entry = unsafe { xr::Entry::load() }
-            .map_err(|e| XrError::RuntimeError(format!("Failed to load OpenXR: {e:?}")))?;
-
-        let available = entry.enumerate_extensions()
-            .map_err(|e| XrError::RuntimeError(format!("Failed to enumerate extensions: {e:?}")))?;
-
-        if !available.mnd_headless {
-            return Err(XrError::ExtensionNotAvailable("MND_headless".to_string()));
+        let (instance, system) =
+            libmotoc::xr_init().map_err(|e| XrError::InstanceCreationFailed(e.to_string()))?;
+        // SAFETY: MND_headless is enabled by libmotoc::xr_init.
+        let (session, _, _) = unsafe {
+            instance.create_session::<xr::headless::Headless>(
+                system,
+                &xr::headless::SessionCreateInfo {},
+            )
         }
-
-        let mut exts = xr::ExtensionSet::default();
-        exts.mnd_headless = true;
-
-        let has_mndx = available.other.iter().any(|e| e == "XR_MNDX_xdev_space");
-        if has_mndx {
-            exts.other.push("XR_MNDX_xdev_space".to_string());
-        }
-        if available.khr_convert_timespec_time {
-            exts.khr_convert_timespec_time = true;
-        }
-
-        let instance = entry.create_instance(
-            &xr::ApplicationInfo {
-                application_name: "spacecal-for-monado",
-                application_version: 1,
-                engine_name: "none",
-                engine_version: 0,
-                api_version: xr::Version::new(1, 0, 0),
-            },
-            &exts,
-            &[],
-        ).map_err(|e| XrError::InstanceCreationFailed(format!("{e:?}")))?;
-
-        let system = instance.system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)
-            .map_err(|e| XrError::RuntimeError(format!("Failed to get system: {e:?}")))?;
-
-        let graphics_binding = GraphicsBindingHeadlessMND {
-            ty: xr::sys::StructureType::from_raw(XR_TYPE_GRAPHICS_BINDING_HEADLESS_MND),
-            next: ptr::null(),
-        };
-
-        let (session, _frame_waiter, _frame_stream) = unsafe {
-            instance.create_session::<Headless>(system, &graphics_binding)
-                .map_err(|e| XrError::SessionCreationFailed(format!("{e:?}")))?
-        };
-
-        let session = session.into_any_graphics();
-
-        let mndx = if has_mndx {
-            Mndx::new(&instance).ok()
-        } else {
-            None
-        };
-
-        Ok(Self {
+        .map_err(|e| XrError::SessionCreationFailed(e.to_string()))?;
+        let mut result = Self {
             instance,
             session,
-            mndx,
-        })
+            running: false,
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !result.running {
+            result
+                .poll_events()
+                .map_err(|e| XrError::RuntimeError(e.user_message()))?;
+            if Instant::now() >= deadline {
+                return Err(XrError::RuntimeError(
+                    "Timed out waiting for OpenXR session".into(),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Ok(result)
+    }
+
+    fn poll_events(&mut self) -> Result<(), StepError> {
+        let mut buffer = xr::EventDataBuffer::new();
+        while let Some(event) = self
+            .instance
+            .poll_event(&mut buffer)
+            .map_err(|e| StepError::Backend(e.to_string()))?
+        {
+            match event {
+                xr::Event::SessionStateChanged(event) => match event.state() {
+                    xr::SessionState::READY => {
+                        self.session
+                            .begin(xr::ViewConfigurationType::PRIMARY_STEREO)
+                            .map_err(|e| StepError::Backend(e.to_string()))?;
+                        self.running = true;
+                    }
+                    xr::SessionState::STOPPING => {
+                        self.running = false;
+                        self.session
+                            .end()
+                            .map_err(|e| StepError::Backend(e.to_string()))?;
+                        return Err(StepError::Backend("OpenXR session stopped".into()));
+                    }
+                    xr::SessionState::EXITING | xr::SessionState::LOSS_PENDING => {
+                        self.running = false;
+                        return Err(StepError::Backend("OpenXR session lost".into()));
+                    }
+                    _ => {}
+                },
+                xr::Event::InstanceLossPending(_) => {
+                    self.running = false;
+                    return Err(StepError::Backend("OpenXR runtime lost".into()));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     pub fn now(&self) -> xr::Time {
@@ -166,14 +107,12 @@ impl XrSession {
     }
 }
 
+// Match the default profile of `motoc calibrate` and `motoc continue`.
+const DEFAULT_PROFILE: &str = "last";
 
 const MOVEMENT_LINEAR_THRESHOLD: f32 = 0.2;
 const MOVEMENT_ANGULAR_THRESHOLD: f32 = 0.5; // rad/s (about 30 deg/s)
 const MOVEMENT_FADE_DURATION: f32 = 2.0;
-
-fn mag3(v: xr::Vector3f) -> f32 {
-    (v.x * v.x + v.y * v.y + v.z * v.z).sqrt()
-}
 
 struct CachedDevice {
     id: String,
@@ -181,13 +120,13 @@ struct CachedDevice {
 }
 
 struct MovementCache {
-    _list: mndx::XDevList,
+    _list: XDevList,
     reference_space: xr::Space,
     devices: Vec<CachedDevice>,
 }
 
-fn build_movement_cache(mndx: &mndx::Mndx, session: &xr::Session<xr::AnyGraphics>) -> Option<MovementCache> {
-    let list = mndx.create_list(session).ok()?;
+fn build_movement_cache(session: &xr::Session<xr::headless::Headless>) -> Option<MovementCache> {
+    let list = session.get_xdev_list().ok()?;
     let xdevs = list.enumerate_xdevs().ok()?;
     let reference_space = session
         .create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)
@@ -200,9 +139,13 @@ fn build_movement_cache(mndx: &mndx::Mndx, session: &xr::Session<xr::AnyGraphics
         }
         let id = {
             let s = d.serial();
-            if s.is_empty() { d.name().to_string() } else { s.to_string() }
+            if s.is_empty() {
+                d.name().to_string()
+            } else {
+                s.to_string()
+            }
         };
-        if let Ok(space) = d.create_space(session.clone()) {
+        if let Ok(space) = d.create_space(xr::Posef::IDENTITY) {
             devices.push(CachedDevice { id, space });
         }
     }
@@ -211,7 +154,11 @@ fn build_movement_cache(mndx: &mndx::Mndx, session: &xr::Session<xr::AnyGraphics
         return None;
     }
 
-    Some(MovementCache { _list: list, reference_space, devices })
+    Some(MovementCache {
+        _list: list,
+        reference_space,
+        devices,
+    })
 }
 
 struct DeviceMovementState {
@@ -219,102 +166,246 @@ struct DeviceMovementState {
     last_moving_time: Option<Instant>,
 }
 
-#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
-pub fn xr_event_loop<S: MessageSender>(
-    cmd_rx: mpsc::Receiver<CalibrationCommand>,
-    msg_tx: S,
-) {
-    let mut xr_session = XrSession::new().ok();
-
+#[allow(clippy::needless_pass_by_value)]
+pub fn xr_event_loop<S: MessageSender>(cmd_rx: mpsc::Receiver<CalibrationCommand>, msg_tx: S) {
     let mut movement_detection_active = false;
-    let mut movement_cache: Option<MovementCache> = None;
-    let mut movement_state: Vec<DeviceMovementState> = Vec::new();
-    let mut last_movement_update = Instant::now();
-    let mut last_reconnect_attempt = Instant::now();
-    let mut consecutive_failures = 0u32;
-
     loop {
-        let recv_result = if movement_detection_active {
-            cmd_rx.recv_timeout(Duration::from_millis(100))
-        } else {
-            cmd_rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)
-        };
-
-        if (xr_session.is_none() || consecutive_failures >= 5)
-            && last_reconnect_attempt.elapsed() >= Duration::from_secs(2)
-        {
-            movement_cache = None;
-            if movement_detection_active {
-                movement_detection_active = false;
-                movement_state.clear();
-                let _ = msg_tx.send(CalibrationMessage::MovementUpdate { movements: vec![] });
+        match XrSession::new() {
+            Ok(mut session) => {
+                match libmonado::Monado::auto_connect()
+                    .map_err(StepError::Backend)
+                    .and_then(|monado| {
+                        run_connected(
+                            &mut session,
+                            &monado,
+                            &cmd_rx,
+                            &msg_tx,
+                            &mut movement_detection_active,
+                        )
+                    }) {
+                    Ok(()) => return,
+                    Err(error) => report(&msg_tx, Err(error)),
+                }
             }
-            last_reconnect_attempt = Instant::now();
-            consecutive_failures = 0;
-            xr_session = XrSession::new().ok();
+            Err(error) => eprintln!("Waiting for OpenXR: {error}"),
         }
-
-        if movement_detection_active && last_movement_update.elapsed() >= Duration::from_millis(100) {
-            let mut op_ok = false;
-
-            if let Some(ref cache) = movement_cache
-                && let Some(ref xr_session) = xr_session
-            {
-                op_ok = true;
-                process_movement_update(cache, xr_session, &mut movement_state, &msg_tx);
-            } else if xr_session.is_some() {
-                consecutive_failures += 1;
-            }
-
-            if op_ok {
-                consecutive_failures = 0;
-            } else if xr_session.is_some() && movement_cache.is_some() {
-                consecutive_failures += 1;
-            }
-
-            last_movement_update = Instant::now();
+        let _ = msg_tx.send(CalibrationMessage::MovementUpdate { movements: vec![] });
+        // Reset remains available without a headless OpenXR connection, as in motoc.
+        match cmd_rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(CalibrationCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            Ok(CalibrationCommand::StartMovementDetection) => movement_detection_active = true,
+            Ok(CalibrationCommand::StopMovementDetection) => movement_detection_active = false,
+            Ok(CalibrationCommand::Reset { target, label }) => handle_reset(target, label, &msg_tx),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Ok(_) => report(
+                &msg_tx,
+                Err(StepError::NotConnected {
+                    action: "calibration",
+                }),
+            ),
         }
+    }
+}
 
-        match recv_result {
+#[allow(clippy::too_many_lines)]
+fn run_connected<S: MessageSender>(
+    session: &mut XrSession,
+    monado: &libmonado::Monado,
+    cmd_rx: &mpsc::Receiver<CalibrationCommand>,
+    msg_tx: &S,
+    movement_detection_active: &mut bool,
+) -> Result<(), StepError> {
+    let mut data = load_calibrator_data(&session.session, monado)?;
+    // A fresh runtime connection restores the shared profile exactly once.
+    // Never reapply it on each timer tick (that would undo an explicit reset).
+    let mut continuous = match load_default_profile(&mut data, msg_tx) {
+        Ok(method) => method,
+        Err(error) => {
+            report(msg_tx, Err(error));
+            None
+        }
+    };
+    let mut movement_cache = None;
+    let mut movement_state = Vec::new();
+    let mut last_movement_update = Instant::now();
+    loop {
+        let interval = if continuous.is_some() { 33 } else { 100 };
+        let command = cmd_rx.recv_timeout(Duration::from_millis(interval));
+        session.poll_events()?;
+        if !session.running {
+            return Err(StepError::Backend("OpenXR session is not running".into()));
+        }
+        match command {
             Ok(CalibrationCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                break;
+                stop_continuous(&mut continuous, &mut data)?;
+                return Ok(());
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Ok(CalibrationCommand::StartMovementDetection) => {
-                movement_detection_active = true;
+                *movement_detection_active = true;
                 movement_state.clear();
-                last_movement_update = Instant::now();
-                if let Some(ref xr_session) = xr_session
-                    && let Some(ref mndx) = xr_session.mndx
-                {
-                    movement_cache = build_movement_cache(mndx, &xr_session.session);
-                }
+                movement_cache = None;
             }
             Ok(CalibrationCommand::StopMovementDetection) => {
+                *movement_detection_active = false;
                 movement_cache = None;
-                movement_detection_active = false;
                 movement_state.clear();
                 let _ = msg_tx.send(CalibrationMessage::MovementUpdate { movements: vec![] });
             }
-            Ok(CalibrationCommand::StartSampled { source_serial, target_serial, target_origin_index, sample_count, stage_offset }) => {
-                report(&msg_tx, handle_start_sampled(
-                    xr_session.as_ref(),
-                    &msg_tx,
-                    &source_serial,
-                    &target_serial,
-                    target_origin_index,
-                    sample_count,
-                    stage_offset.as_ref(),
-                ));
-            }
-            Ok(CalibrationCommand::CalibrateFloor { target_serial }) => {
-                report(&msg_tx, handle_calibrate_floor(xr_session.as_ref(), &msg_tx, &target_serial));
+            Ok(CalibrationCommand::StartSampled {
+                source_serial,
+                target_serial,
+                sample_count,
+            }) => {
+                stop_continuous(&mut continuous, &mut data)?;
+                report(
+                    msg_tx,
+                    handle_start_sampled(
+                        Some(session),
+                        msg_tx,
+                        &source_serial,
+                        &target_serial,
+                        sample_count,
+                    ),
+                );
             }
             Ok(CalibrationCommand::Recenter) => {
-                report(&msg_tx, handle_recenter(xr_session.as_ref(), &msg_tx));
+                report(msg_tx, handle_recenter(Some(session), msg_tx));
+            }
+            Ok(CalibrationCommand::Reset { target, label }) => {
+                stop_continuous(&mut continuous, &mut data)?;
+                handle_reset(target, label, msg_tx);
             }
         }
+        if let Some(method) = continuous.as_mut() {
+            data.now = session
+                .instance
+                .now()
+                .map_err(|e| StepError::Backend(e.to_string()))?;
+            match method.step(&mut data) {
+                Ok((StepResult::Continue, _)) => {}
+                Ok((StepResult::End, _)) => stop_continuous(&mut continuous, &mut data)?,
+                Ok((StepResult::Replace(mut next), _)) => {
+                    method.finish(&mut data)?;
+                    next.init(&mut data)?;
+                    continuous = Some(next);
+                }
+                Err(error) => {
+                    stop_continuous(&mut continuous, &mut data)?;
+                    report(msg_tx, Err(error.into()));
+                }
+            }
+        }
+        if *movement_detection_active
+            && last_movement_update.elapsed() >= Duration::from_millis(100)
+        {
+            if movement_cache.is_none() {
+                movement_cache = build_movement_cache(&session.session);
+            }
+            if let Some(cache) = movement_cache.as_ref() {
+                process_movement_update(cache, session, &mut movement_state, msg_tx);
+            }
+            last_movement_update = Instant::now();
+        }
     }
+}
+
+fn stop_continuous(
+    method: &mut Option<Box<dyn Calibrator>>,
+    data: &mut CalibratorData<'_>,
+) -> Result<(), StepError> {
+    if let Some(mut method) = method.take() {
+        method.finish(data)?;
+    }
+    Ok(())
+}
+
+fn handle_reset<S: MessageSender>(target: crate::monado::ResetTarget, label: String, msg_tx: &S) {
+    match crate::monado::MonadoConnection::connect().and_then(|connection| connection.reset(target))
+    {
+        Ok(()) => {
+            let _ = msg_tx.send(CalibrationMessage::ResetComplete(label));
+        }
+        Err(error) => report(msg_tx, Err(StepError::Backend(error.to_string()))),
+    }
+}
+
+fn load_default_profile<S: MessageSender>(
+    data: &mut CalibratorData<'_>,
+    msg_tx: &S,
+) -> Result<Option<Box<dyn Calibrator>>, StepError> {
+    let Some(saved) = optional_profile(data.load_calibration(DEFAULT_PROFILE))? else {
+        return Ok(None);
+    };
+    let method = match saved.offset_type {
+        OffsetType::TrackingOrigin => {
+            // This is the same restore path as `motoc continue`. libmotoc owns
+            // the file format, but exposes no one-shot apply method.
+            let source = data
+                .tracking_origins
+                .iter()
+                .find(|origin| origin.name == saved.src);
+            let source_offset = if let Some(source) = source {
+                TransformD::from(source.get_offset().map_err(libmotoc::Error::from)?)
+            } else {
+                eprintln!(
+                    "Source origin {:?} not found; restoring with identity source, as motoc does",
+                    saved.src
+                );
+                TransformD::default()
+            };
+            let destination = data
+                .tracking_origins
+                .iter()
+                .find(|origin| origin.name == saved.dst)
+                .ok_or_else(|| {
+                    StepError::Backend(format!(
+                        "Saved target tracking origin {:?} not found",
+                        saved.dst
+                    ))
+                })?;
+            destination
+                .set_offset(restored_origin_offset(&saved, source_offset).into())
+                .map_err(libmotoc::Error::from)?;
+            None
+        }
+        OffsetType::Device => {
+            let find = |serial: &str, role| {
+                data.devices
+                    .iter()
+                    .position(|device| device.serial == serial)
+                    .ok_or_else(|| StepError::DeviceNotFound {
+                        role,
+                        serial: serial.into(),
+                    })
+            };
+            let src = find(&saved.src, "Source")?;
+            let dst = find(&saved.dst, "Target")?;
+            let mut method = OffsetMethod::new_internal(src, dst, saved.offset, 0.02);
+            method.init(data)?;
+            Some(Box::new(method) as Box<dyn Calibrator>)
+        }
+    };
+    let _ = msg_tx.send(CalibrationMessage::ProfileRestored {
+        continuous: method.is_some(),
+    });
+    Ok(method)
+}
+
+fn optional_profile(
+    result: libmotoc::Result<SavedCalibration>,
+) -> Result<Option<SavedCalibration>, StepError> {
+    match result {
+        Ok(saved) => Ok(Some(saved)),
+        Err(libmotoc::Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(StepError::Backend(format!(
+            "Cannot read saved calibration: {error}"
+        ))),
+    }
+}
+
+fn restored_origin_offset(saved: &SavedCalibration, source_offset: TransformD) -> TransformD {
+    saved.offset * source_offset
 }
 
 fn process_movement_update<S: MessageSender>(
@@ -328,15 +419,8 @@ fn process_movement_update<S: MessageSender>(
 
     for cached in &cache.devices {
         if let Ok((_location, velocity)) = cached.space.relate(&cache.reference_space, time) {
-            let linear_valid = velocity.velocity_flags.contains(xr::SpaceVelocityFlags::LINEAR_VALID);
-            let angular_valid = velocity.velocity_flags.contains(xr::SpaceVelocityFlags::ANGULAR_VALID);
-
-            if !linear_valid && !angular_valid {
-                continue;
-            }
-
-            let linear_moving = linear_valid && mag3(velocity.linear_velocity) > MOVEMENT_LINEAR_THRESHOLD;
-            let angular_moving = angular_valid && mag3(velocity.angular_velocity) > MOVEMENT_ANGULAR_THRESHOLD;
+            let linear_moving = velocity.effective_linear().norm() > MOVEMENT_LINEAR_THRESHOLD;
+            let angular_moving = velocity.effective_angular().norm() > MOVEMENT_ANGULAR_THRESHOLD;
             let is_moving = linear_moving || angular_moving;
 
             if let Some(s) = movement_state.iter_mut().find(|s| s.device_id == cached.id) {
@@ -359,7 +443,10 @@ fn process_movement_update<S: MessageSender>(
             let elapsed = now.duration_since(last_moving).as_secs_f32();
             if elapsed < MOVEMENT_FADE_DURATION {
                 let intensity = 1.0 - (elapsed / MOVEMENT_FADE_DURATION);
-                Some(DeviceMovement { device_id: s.device_id.clone(), intensity })
+                Some(DeviceMovement {
+                    device_id: s.device_id.clone(),
+                    intensity,
+                })
             } else {
                 None
             }
@@ -372,43 +459,25 @@ fn process_movement_update<S: MessageSender>(
 #[derive(Debug)]
 enum StepError {
     NotConnected { action: &'static str },
-    MndxUnavailable,
-    DeviceList(String),
-    Enumerate(String),
+    Backend(String),
     DeviceNotFound { role: &'static str, serial: String },
-    Unsupported { role: &'static str, name: String },
-    SpaceCreate { role: &'static str, detail: String },
-    ReferenceSpace { kind: &'static str, detail: String },
-    Locate { what: &'static str, detail: String },
-    InvalidSample(String),
-    Floor(String),
-    HmdPoseInvalid { pos_valid: bool, ori_valid: bool },
-    Compute(crate::error::CalibrationError),
 }
 
 impl StepError {
     fn user_message(&self) -> String {
         match self {
             Self::NotConnected { action } => format!("Connect to Monado to enable {action}"),
-            Self::MndxUnavailable => "MNDX_xdev_space extension not available".to_string(),
-            Self::DeviceList(detail) => format!("Failed to create device list: {detail}"),
-            Self::Enumerate(detail) => format!("Failed to enumerate devices: {detail}"),
-            Self::DeviceNotFound { role, serial } => format!("{role} device '{serial}' not found"),
-            Self::Unsupported { role, name } => format!("{role} device '{name}' does not support pose tracking"),
-            Self::SpaceCreate { role, detail } => format!("Failed to create space for {} device: {detail}", role.to_lowercase()),
-            Self::ReferenceSpace { kind, detail } => format!("Failed to create {kind} space: {detail}"),
-            Self::Locate { what, detail } => format!("Failed to locate {what}: {detail}"),
-            Self::InvalidSample(detail) => format!("Invalid pose sample: {detail}"),
-            Self::Floor(detail) => format!("Floor calibration failed: {detail}"),
-            Self::HmdPoseInvalid { pos_valid, ori_valid } => format!("HMD pose not valid (pos={pos_valid}, ori={ori_valid})"),
-            Self::Compute(e) => match e {
-                crate::error::CalibrationError::InsufficientSamples { .. } =>
-                    "Not enough movement \u{2014} grip both devices firmly and sweep a wide figure-eight".to_string(),
-                crate::error::CalibrationError::SvdFailed =>
-                    "Calibration math failed \u{2014} try again with more varied motion".to_string(),
-                other => format!("Calibration failed: {other:?}"),
-            },
+            Self::Backend(detail) => format!("Calibration backend: {detail}"),
+            Self::DeviceNotFound { role, serial } => {
+                format!("{role} device '{serial}' not found or not tracked")
+            }
         }
+    }
+}
+
+impl From<libmotoc::Error> for StepError {
+    fn from(error: libmotoc::Error) -> Self {
+        Self::Backend(error.to_string())
     }
 }
 
@@ -426,256 +495,226 @@ fn sleep_until(next: &mut Instant, interval: Duration) {
     }
 }
 
-fn enumerate_devices(xr_session: &XrSession) -> Result<Vec<mndx::XDev>, StepError> {
-    let mndx = xr_session.mndx.as_ref().ok_or(StepError::MndxUnavailable)?;
-    let list = mndx.create_list(&xr_session.session)
-        .map_err(|e| StepError::DeviceList(format!("{e:?}")))?;
-    list.enumerate_xdevs()
-        .map_err(|e| StepError::Enumerate(format!("{e:?}")))
-}
-
-fn resolve_device<'a>(
-    devices: &'a [mndx::XDev],
-    serial: &str,
-    role: &'static str,
-) -> Result<&'a mndx::XDev, StepError> {
-    let dev = devices.iter()
-        .find(|d| d.serial() == serial || d.name() == serial)
-        .ok_or_else(|| StepError::DeviceNotFound { role, serial: serial.to_string() })?;
-
-    if !dev.can_create_space() {
-        return Err(StepError::Unsupported { role, name: dev.name().to_string() });
+fn load_calibrator_data<'a>(
+    session: &xr::Session<xr::headless::Headless>,
+    monado: &'a libmonado::Monado,
+) -> Result<CalibratorData<'a>, StepError> {
+    let list = session
+        .get_xdev_list()
+        .map_err(|e| StepError::Backend(e.to_string()))?;
+    let xdevs = list
+        .enumerate_xdevs()
+        .map_err(|e| StepError::Backend(e.to_string()))?;
+    let mut devices = Vec::new();
+    for inner in monado
+        .devices()
+        .map_err(|e| StepError::Backend(format!("{e:?}")))?
+    {
+        let serial = inner
+            .serial()
+            .map_err(|e| StepError::Backend(format!("{e:?}")))?;
+        if let Some(xdev) = xdevs
+            .iter()
+            .find(|d| d.serial() == serial && d.can_create_space())
+        {
+            devices.push(libmotoc::Device {
+                tracking_origin: inner
+                    .get_info_u32(libmonado::MndProperty::PropertyTrackingOriginU32)
+                    .map_err(|e| StepError::Backend(format!("{e:?}")))?,
+                index: inner.index,
+                serial,
+                space: xdev
+                    .create_space(xr::Posef::IDENTITY)
+                    .map_err(|e| StepError::Backend(e.to_string()))?,
+                inner,
+            });
+        }
     }
-
-    Ok(dev)
-}
-
-fn create_device_space(
-    dev: &mndx::XDev,
-    session: &xr::Session<xr::AnyGraphics>,
-    role: &'static str,
-) -> Result<xr::Space, StepError> {
-    dev.create_space(session.clone())
-        .map_err(|e| StepError::SpaceCreate { role, detail: format!("{e:?}") })
+    Ok(CalibratorData {
+        monado,
+        tracking_origins: monado
+            .tracking_origins()
+            .map_err(|e| StepError::Backend(format!("{e:?}")))?
+            .into_iter()
+            .collect(),
+        devices,
+        stage: create_reference_space(session, xr::ReferenceSpaceType::STAGE)?,
+        local: create_reference_space(session, xr::ReferenceSpaceType::LOCAL)?,
+        view: create_reference_space(session, xr::ReferenceSpaceType::VIEW)?,
+        now: session
+            .instance()
+            .now()
+            .map_err(|e| StepError::Backend(e.to_string()))?,
+    })
 }
 
 fn create_reference_space(
-    session: &xr::Session<xr::AnyGraphics>,
-    space_type: xr::ReferenceSpaceType,
-    kind: &'static str,
+    session: &xr::Session<xr::headless::Headless>,
+    kind: xr::ReferenceSpaceType,
 ) -> Result<xr::Space, StepError> {
-    session.create_reference_space(space_type, xr::Posef::IDENTITY)
-        .map_err(|e| StepError::ReferenceSpace { kind, detail: format!("{e:?}") })
+    session
+        .create_reference_space(kind, xr::Posef::IDENTITY)
+        .map_err(|e| StepError::Backend(e.to_string()))
 }
 
-fn create_stage_or_local_space(session: &xr::Session<xr::AnyGraphics>) -> Result<xr::Space, StepError> {
-    if let Ok(space) = session.create_reference_space(xr::ReferenceSpaceType::STAGE, xr::Posef::IDENTITY) {
-        return Ok(space);
-    }
-    create_reference_space(session, xr::ReferenceSpaceType::LOCAL, "reference")
-}
-
-fn collect_pose_samples<S: MessageSender>(
-    xr_session: &XrSession,
-    source_space: &xr::Space,
-    target_space: &xr::Space,
-    reference_space: &xr::Space,
-    sample_count: u32,
-    stage_offset: Option<&([f64; 3], [f64; 4])>,
+fn run_calibrator<S: MessageSender>(
+    session: &mut XrSession,
+    data: &mut CalibratorData<'_>,
+    mut method: Box<dyn Calibrator>,
     msg_tx: &S,
-) -> Result<SampleCollector, StepError> {
-    let mut collector = SampleCollector::new(sample_count);
-
-    let sample_interval = Duration::from_millis(33);
-    let mut next_sample_time = Instant::now();
-
-    while !collector.is_complete() {
-        let time = xr_session.now();
-
-        let source_location = source_space.locate(reference_space, time)
-            .map_err(|e| StepError::Locate { what: "source space", detail: format!("{e:?}") })?;
-        let target_location = target_space.locate(reference_space, time)
-            .map_err(|e| StepError::Locate { what: "target space", detail: format!("{e:?}") })?;
-
-        let source_valid = source_location.location_flags.contains(
-            xr::SpaceLocationFlags::POSITION_VALID | xr::SpaceLocationFlags::ORIENTATION_VALID
-        );
-        let target_valid = target_location.location_flags.contains(
-            xr::SpaceLocationFlags::POSITION_VALID | xr::SpaceLocationFlags::ORIENTATION_VALID
-        );
-
-        if !source_valid || !target_valid {
-            sleep_until(&mut next_sample_time, sample_interval);
-            continue;
+) -> Result<(), StepError> {
+    let mut next = Instant::now();
+    let deadline = next + Duration::from_secs(120);
+    let result = (|| {
+        let mut step = method.init(data)?;
+        loop {
+            match step {
+                StepResult::End => return Ok(()),
+                StepResult::Replace(replacement) => {
+                    method.finish(data)?;
+                    method = replacement;
+                    step = method.init(data)?;
+                    continue;
+                }
+                StepResult::Continue => {}
+            }
+            if Instant::now() >= deadline {
+                return Err(StepError::Backend(
+                    "Timed out; check tracking and try again".into(),
+                ));
+            }
+            session.poll_events()?;
+            data.now = session
+                .instance
+                .now()
+                .map_err(|e| StepError::Backend(e.to_string()))?;
+            let (next_step, status) = method.step(data)?;
+            if let Some(CalibratorStatus::Progress { current, max, .. }) = status {
+                let _ = msg_tx.send(CalibrationMessage::Progress {
+                    collected: current.try_into().unwrap_or(u32::MAX),
+                    total: max.try_into().unwrap_or(u32::MAX),
+                });
+            }
+            step = next_step;
+            sleep_until(&mut next, Duration::from_millis(33));
         }
-
-        let source_pose = source_location.pose;
-        let target_pose = target_location.pose;
-
-        let mut source_transform = TransformD::from_xr_pose(
-            [source_pose.position.x, source_pose.position.y, source_pose.position.z],
-            [source_pose.orientation.x, source_pose.orientation.y,
-             source_pose.orientation.z, source_pose.orientation.w],
-        );
-        let mut target_transform = TransformD::from_xr_pose(
-            [target_pose.position.x, target_pose.position.y, target_pose.position.z],
-            [target_pose.orientation.x, target_pose.orientation.y,
-             target_pose.orientation.z, target_pose.orientation.w],
-        );
-
-        if let Some((pos, ori)) = stage_offset {
-            let stage = TransformD::from_position_orientation_f64(*pos, *ori);
-            source_transform = stage.mul(&source_transform);
-            target_transform = stage.mul(&target_transform);
-        }
-
-        let sample = PoseSample::from_transforms(&source_transform, &target_transform);
-        collector.add_sample(sample)
-            .map_err(|e| StepError::InvalidSample(format!("{e:?}")))?;
-
-        let (collected, total) = collector.progress();
-        let _ = msg_tx.send(CalibrationMessage::Progress { collected, total });
-
-        if !collector.is_complete() {
-            sleep_until(&mut next_sample_time, sample_interval);
-        }
-    }
-
-    Ok(collector)
+    })();
+    let finish = method.finish(data).map_err(StepError::from);
+    result.and(finish)
 }
 
 fn handle_start_sampled<S: MessageSender>(
-    xr_session: Option<&XrSession>,
+    xr_session: Option<&mut XrSession>,
     msg_tx: &S,
     source_serial: &str,
     target_serial: &str,
-    target_origin_index: u32,
     sample_count: u32,
-    stage_offset: Option<&([f64; 3], [f64; 4])>,
 ) -> Result<(), StepError> {
-    let xr_session = xr_session.ok_or(StepError::NotConnected { action: "calibration" })?;
-
-    let devices = enumerate_devices(xr_session)?;
-    let source_dev = resolve_device(&devices, source_serial, "Source")?;
-    let target_dev = resolve_device(&devices, target_serial, "Target")?;
-
-    let source_space = create_device_space(source_dev, &xr_session.session, "Source")?;
-    let target_space = create_device_space(target_dev, &xr_session.session, "Target")?;
-    let reference_space = create_stage_or_local_space(&xr_session.session)?;
-
-    // Countdown only after setup is known-good, so a misconfigured device fails fast.
-    for seconds_left in (1..=3).rev() {
-        let _ = msg_tx.send(CalibrationMessage::Countdown { seconds: seconds_left });
+    let session = xr_session.ok_or(StepError::NotConnected {
+        action: "calibration",
+    })?;
+    if sample_count < 3 {
+        return Err(StepError::Backend(
+            "At least three samples are required".into(),
+        ));
+    }
+    let monado = libmonado::Monado::auto_connect().map_err(StepError::Backend)?;
+    let mut data = load_calibrator_data(&session.session, &monado)?;
+    let find = |serial: &str, role| {
+        data.devices
+            .iter()
+            .position(|d| d.serial == serial || d.inner.name == serial)
+            .ok_or_else(|| StepError::DeviceNotFound {
+                role,
+                serial: serial.into(),
+            })
+    };
+    let src = find(source_serial, "Source")?;
+    let dst = find(target_serial, "Target")?;
+    if data.devices[src].tracking_origin == data.devices[dst].tracking_origin {
+        return Err(StepError::Backend(
+            "Select devices from different tracking origins".into(),
+        ));
+    }
+    for seconds in (1..=3).rev() {
+        let _ = msg_tx.send(CalibrationMessage::Countdown { seconds });
         std::thread::sleep(Duration::from_secs(1));
     }
-
-    let collector = collect_pose_samples(
-        xr_session,
-        &source_space,
-        &target_space,
-        &reference_space,
-        sample_count,
-        stage_offset,
+    run_calibrator(
+        session,
+        &mut data,
+        Box::new(SampledMethod::new(
+            src,
+            dst,
+            false,
+            sample_count,
+            DEFAULT_PROFILE.into(),
+        )),
         msg_tx,
     )?;
-
-    let (offset, median_error_degrees, axis_diversity) =
-        collector.compute_calibration().map_err(StepError::Compute)?;
-
-    // O = S × T⁻¹ (averaged); satisfies O × T = S, applied to the target origin.
-    let _ = msg_tx.send(CalibrationMessage::SampledComplete(CalibrationResult {
-        transform: offset,
-        target_origin_index,
-        median_error_degrees,
-        axis_diversity,
-    }));
-    Ok(())
-}
-
-fn handle_calibrate_floor<S: MessageSender>(
-    xr_session: Option<&XrSession>,
-    msg_tx: &S,
-    target_serial: &str,
-) -> Result<(), StepError> {
-    let xr_session = xr_session.ok_or(StepError::NotConnected { action: "floor calibration" })?;
-
-    let devices = enumerate_devices(xr_session)?;
-    let target_dev = resolve_device(&devices, target_serial, "Target")?;
-    let target_space = create_device_space(target_dev, &xr_session.session, "Target")?;
-    let reference_space = create_stage_or_local_space(&xr_session.session)?;
-
-    let mut floor_cal = FloorCalibrator::with_default_config();
-    floor_cal.start();
-
-    let sample_interval = Duration::from_millis(33);
-    let mut next_sample_time = Instant::now();
-
-    while floor_cal.is_active() {
-        let time = xr_session.now();
-
-        let Ok(location) = target_space.locate(&reference_space, time) else {
-            sleep_until(&mut next_sample_time, sample_interval);
-            continue;
-        };
-
-        if location.location_flags.contains(xr::SpaceLocationFlags::POSITION_VALID) {
-            match floor_cal.add_sample(location.pose.position.y) {
-                Ok(Some(adjustment)) => {
-                    let _ = msg_tx.send(CalibrationMessage::FloorComplete {
-                        height_adjustment: adjustment,
-                    });
-                    break;
-                }
-                Ok(None) => {
-                    let (collected, total) = floor_cal.progress();
-                    let _ = msg_tx.send(CalibrationMessage::FloorProgress { collected, total });
-                }
-                Err(e) => return Err(StepError::Floor(format!("{e:?}"))),
-            }
-        }
-
-        sleep_until(&mut next_sample_time, sample_interval);
-    }
+    // SampledMethod applies the offset itself. The UI must not apply it again.
+    let _ = msg_tx.send(CalibrationMessage::SampledComplete);
     Ok(())
 }
 
 fn handle_recenter<S: MessageSender>(
-    xr_session: Option<&XrSession>,
+    xr_session: Option<&mut XrSession>,
     msg_tx: &S,
 ) -> Result<(), StepError> {
-    let xr_session = xr_session.ok_or(StepError::NotConnected { action: "recenter" })?;
-
-    let view_space = create_reference_space(&xr_session.session, xr::ReferenceSpaceType::VIEW, "VIEW")?;
-    let stage_space = create_reference_space(&xr_session.session, xr::ReferenceSpaceType::STAGE, "STAGE")?;
-
-    // Countdown after spaces exist, so the HMD pose is captured once the user is in position.
-    for seconds_left in (1..=3).rev() {
-        let _ = msg_tx.send(CalibrationMessage::RecenterCountdown { seconds: seconds_left });
+    let session = xr_session.ok_or(StepError::NotConnected { action: "recenter" })?;
+    let monado = libmonado::Monado::auto_connect().map_err(StepError::Backend)?;
+    let mut data = load_calibrator_data(&session.session, &monado)?;
+    for seconds in (1..=3).rev() {
+        let _ = msg_tx.send(CalibrationMessage::RecenterCountdown { seconds });
         std::thread::sleep(Duration::from_secs(1));
     }
+    let method = RecenterMethod::new("stage", &Some("keep".into()))?;
+    run_calibrator(session, &mut data, Box::new(method), msg_tx)?;
+    let _ = msg_tx.send(CalibrationMessage::RecenterComplete);
+    Ok(())
+}
 
-    let time = xr_session.now();
-    let location = view_space.locate(&stage_space, time)
-        .map_err(|e| StepError::Locate { what: "HMD", detail: format!("{e:?}") })?;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let pos_valid = location.location_flags.contains(xr::SpaceLocationFlags::POSITION_VALID);
-    let ori_valid = location.location_flags.contains(xr::SpaceLocationFlags::ORIENTATION_VALID);
-    if !pos_valid || !ori_valid {
-        return Err(StepError::HmdPoseInvalid { pos_valid, ori_valid });
+    #[test]
+    fn only_missing_profiles_are_ignored() {
+        assert!(
+            optional_profile(Err(libmotoc::Error::Io(std::io::Error::from(
+                std::io::ErrorKind::NotFound
+            ),)))
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            optional_profile(Err(libmotoc::Error::Io(std::io::Error::from(
+                std::io::ErrorKind::PermissionDenied
+            ),)))
+            .is_err()
+        );
+        let corrupt = serde_json::from_str::<SavedCalibration>("{broken")
+            .err()
+            .unwrap();
+        assert!(optional_profile(Err(libmotoc::Error::Json(corrupt))).is_err());
     }
 
-    let position = [
-        location.pose.position.x,
-        location.pose.position.y,
-        location.pose.position.z,
-    ];
-    let orientation = [
-        location.pose.orientation.x,
-        location.pose.orientation.y,
-        location.pose.orientation.z,
-        location.pose.orientation.w,
-    ];
-
-    let _ = msg_tx.send(CalibrationMessage::RecenterComplete { position, orientation });
-    Ok(())
+    #[test]
+    fn restore_composes_saved_offset_before_current_source_like_motoc() {
+        let mut pose: libmonado::Pose = TransformD::default().into();
+        pose.position.z = 2.0;
+        pose.orientation.v.y = std::f32::consts::FRAC_1_SQRT_2;
+        pose.orientation.s = std::f32::consts::FRAC_1_SQRT_2;
+        let saved = SavedCalibration {
+            offset_type: OffsetType::TrackingOrigin,
+            src: "source".into(),
+            dst: "target".into(),
+            offset: pose.into(),
+        };
+        let mut source: libmonado::Pose = TransformD::default().into();
+        source.position.x = 1.0;
+        let restored = restored_origin_offset(&saved, source.into());
+        assert!(restored.origin.x.abs() < 1e-6);
+        assert!((restored.origin.z - 1.0).abs() < 1e-6);
+    }
 }

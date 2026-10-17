@@ -100,10 +100,6 @@ impl AppState {
         self.connection.is_some()
     }
 
-    pub const fn connection(&self) -> Option<&MonadoConnection> {
-        self.connection.as_ref()
-    }
-
     pub fn categories(&self) -> &[Category] {
         &self.categories
     }
