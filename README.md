@@ -10,7 +10,7 @@
 
 ---
 
-MotocalGUI is a hard fork of [SpaceCal for Monado](https://github.com/99oblivius/spacecal-for-monado), developed independently as a GTK4 frontend for libmotoc.
+MotocalGUI is a hard fork of [SpaceCal for Monado](https://github.com/99oblivius/spacecal-for-monado), featuring a GTK4 frontend powered by libmotoc.
 
 MotocalGUI uses [libmotoc](https://docs.rs/libmotoc/0.4.0/libmotoc/) for sampled calibration, tracking-origin corrections, recentering, and OpenXR initialization. MotocalGUI aligns VR devices from different tracking systems into a single unified space through the Monado OpenXR runtime. Use your Quest headset with lighthouse-tracked controllers, Vive trackers, or any mix of tracking technologies.
 
