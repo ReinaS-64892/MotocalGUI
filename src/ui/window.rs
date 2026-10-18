@@ -341,6 +341,13 @@ pub fn build_ui(app: &adw::Application) {
     });
 
     let continuous_check = gtk4::CheckButton::with_label("Continuous calibration");
+    continuous_check.set_active(state.borrow().continuous_mode());
+    let state_for_continuous = Rc::clone(&state);
+    continuous_check.connect_toggled(move |check| {
+        state_for_continuous
+            .borrow_mut()
+            .set_continuous_mode(check.is_active());
+    });
     continuous_check.set_margin_start(18);
     continuous_check.set_margin_end(18);
     continuous_check.set_margin_top(8);
@@ -902,9 +909,6 @@ pub fn build_ui(app: &adw::Application) {
                     toasts_for_msg.show(&format!("Reset {label}"));
                 }
                 CalibrationMessage::ProfileRestored { continuous } => {
-                    if continuous {
-                        continuous_check.set_active(true);
-                    }
                     continuous_active.set(continuous);
                     update_calibrate_button(
                         &calibrate_btn_for_msg,

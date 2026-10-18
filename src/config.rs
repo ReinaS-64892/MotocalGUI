@@ -11,6 +11,8 @@ pub struct Config {
     pub hide_calibration_help: bool,
     #[serde(default = "default_sample_count")]
     pub sample_count: u32,
+    #[serde(default)]
+    pub continuous_mode: bool,
 }
 
 const fn default_sample_count() -> u32 {
@@ -24,6 +26,7 @@ impl Default for Config {
             target: String::new(),
             hide_calibration_help: false,
             sample_count: default_sample_count(),
+            continuous_mode: false,
         }
     }
 }
@@ -81,5 +84,25 @@ mod tests {
         let existing: Config = serde_json::from_str(r#"{"source":"", "target":""}"#).unwrap();
         assert_eq!(Config::default().sample_count, 400);
         assert_eq!(existing.sample_count, Config::default().sample_count);
+    }
+
+    #[test]
+    fn continuous_mode_defaults_off_for_existing_configs() {
+        let existing: Config = serde_json::from_str(r#"{"source":"", "target":""}"#).unwrap();
+        assert!(!Config::default().continuous_mode);
+        assert!(!existing.continuous_mode);
+    }
+
+    #[test]
+    fn continuous_mode_survives_config_round_trip() {
+        for continuous_mode in [true, false] {
+            let config = Config {
+                continuous_mode,
+                ..Config::default()
+            };
+            let saved = serde_json::to_string(&config).unwrap();
+            let restored: Config = serde_json::from_str(&saved).unwrap();
+            assert_eq!(restored.continuous_mode, continuous_mode);
+        }
     }
 }

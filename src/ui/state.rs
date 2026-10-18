@@ -70,6 +70,7 @@ pub struct AppState {
     known_battery_devices: HashMap<String, BatteryInfo>,
     hide_calibration_help: bool,
     sample_count: u32,
+    continuous_mode: bool,
 }
 
 impl AppState {
@@ -84,6 +85,7 @@ impl AppState {
             known_battery_devices: HashMap::new(),
             hide_calibration_help: config.hide_calibration_help,
             sample_count: config.sample_count,
+            continuous_mode: config.continuous_mode,
         };
         state.refresh_connection();
         state
@@ -290,12 +292,24 @@ impl AppState {
         }
     }
 
+    pub const fn continuous_mode(&self) -> bool {
+        self.continuous_mode
+    }
+
+    pub fn set_continuous_mode(&mut self, enabled: bool) {
+        if self.continuous_mode != enabled {
+            self.continuous_mode = enabled;
+            self.save_config();
+        }
+    }
+
     fn save_config(&self) {
         let config = Config {
             source: self.source_id.clone().unwrap_or_default(),
             target: self.target_id.clone().unwrap_or_default(),
             hide_calibration_help: self.hide_calibration_help,
             sample_count: self.sample_count,
+            continuous_mode: self.continuous_mode,
         };
         if let Err(e) = config.save() {
             eprintln!("Warning: Failed to save config: {e}");
