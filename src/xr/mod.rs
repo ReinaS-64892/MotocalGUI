@@ -258,25 +258,39 @@ fn run_connected<S: MessageSender>(
                 source_serial,
                 target_serial,
                 sample_count,
+                continuous: maintain,
             }) => {
                 stop_continuous(&mut continuous, &mut data)?;
-                report_connected(
+                // Refresh the device list before a new calibration, keeping the
+                // same data and device indices for its continuous successor.
+                data = load_calibrator_data(&session.session, monado)?;
+                let result = handle_start_sampled(
+                    session,
+                    &mut data,
                     msg_tx,
-                    handle_start_sampled(
-                        Some(session),
-                        msg_tx,
-                        &source_serial,
-                        &target_serial,
-                        sample_count,
-                    ),
-                    monado,
-                )?;
+                    &source_serial,
+                    &target_serial,
+                    sample_count,
+                    maintain,
+                );
+                match result {
+                    Ok(method) => continuous = method,
+                    Err(error) => {
+                        let _ = msg_tx.send(CalibrationMessage::ContinuousStopped);
+                        report_connected(msg_tx, Err(error), monado)?;
+                    }
+                }
+            }
+            Ok(CalibrationCommand::StopContinuous) => {
+                stop_continuous(&mut continuous, &mut data)?;
+                let _ = msg_tx.send(CalibrationMessage::ContinuousStopped);
             }
             Ok(CalibrationCommand::Recenter) => {
                 report_connected(msg_tx, handle_recenter(Some(session), msg_tx), monado)?;
             }
             Ok(CalibrationCommand::Reset { target, label }) => {
                 stop_continuous(&mut continuous, &mut data)?;
+                let _ = msg_tx.send(CalibrationMessage::ContinuousStopped);
                 handle_reset(target, label, msg_tx);
             }
         }
@@ -284,7 +298,10 @@ fn run_connected<S: MessageSender>(
             data.now = session.instance.now().map_err(StepError::from)?;
             match method.step(&mut data) {
                 Ok((StepResult::Continue, _)) => {}
-                Ok((StepResult::End, _)) => stop_continuous(&mut continuous, &mut data)?,
+                Ok((StepResult::End, _)) => {
+                    stop_continuous(&mut continuous, &mut data)?;
+                    let _ = msg_tx.send(CalibrationMessage::ContinuousStopped);
+                }
                 Ok((StepResult::Replace(mut next), _)) => {
                     method.finish(&mut data)?;
                     next.init(&mut data)?;
@@ -292,6 +309,7 @@ fn run_connected<S: MessageSender>(
                 }
                 Err(error) => {
                     stop_continuous(&mut continuous, &mut data)?;
+                    let _ = msg_tx.send(CalibrationMessage::ContinuousStopped);
                     report_connected(msg_tx, Err(error.into()), monado)?;
                 }
             }
@@ -611,19 +629,18 @@ fn run_calibrator<S: MessageSender>(
     data: &mut CalibratorData<'_>,
     mut method: Box<dyn Calibrator>,
     msg_tx: &S,
-) -> Result<(), StepError> {
+) -> Result<Option<Box<dyn Calibrator>>, StepError> {
     let mut next = Instant::now();
     let deadline = next + Duration::from_secs(120);
     let result = (|| {
         let mut step = method.init(data)?;
         loop {
             match step {
-                StepResult::End => return Ok(()),
+                StepResult::End => return Ok(None),
                 StepResult::Replace(replacement) => {
-                    method.finish(data)?;
-                    method = replacement;
-                    step = method.init(data)?;
-                    continue;
+                    // Hand the continuous method back to the command loop so
+                    // it remains responsive to stop/reset/recenter/shutdown.
+                    return Ok(Some(replacement));
                 }
                 StepResult::Continue => {}
             }
@@ -646,26 +663,24 @@ fn run_calibrator<S: MessageSender>(
         }
     })();
     let finish = method.finish(data).map_err(StepError::from);
-    result.and(finish)
+    result.and_then(|next| finish.map(|()| next))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_start_sampled<S: MessageSender>(
-    xr_session: Option<&mut XrSession>,
+    session: &mut XrSession,
+    data: &mut CalibratorData<'_>,
     msg_tx: &S,
     source_serial: &str,
     target_serial: &str,
     sample_count: u32,
-) -> Result<(), StepError> {
-    let session = xr_session.ok_or(StepError::NotConnected {
-        action: "calibration",
-    })?;
+    continuous: bool,
+) -> Result<Option<Box<dyn Calibrator>>, StepError> {
     if sample_count < 3 {
         return Err(StepError::Backend(
             "At least three samples are required".into(),
         ));
     }
-    let monado = libmonado::Monado::auto_connect().map_err(StepError::Backend)?;
-    let mut data = load_calibrator_data(&session.session, &monado)?;
     let find = |serial: &str, role| {
         data.devices
             .iter()
@@ -686,21 +701,26 @@ fn handle_start_sampled<S: MessageSender>(
         let _ = msg_tx.send(CalibrationMessage::Countdown { seconds });
         std::thread::sleep(Duration::from_secs(1));
     }
-    run_calibrator(
+    let mut next = run_calibrator(
         session,
-        &mut data,
+        data,
         Box::new(SampledMethod::new(
             src,
             dst,
-            false,
+            continuous,
             sample_count,
             DEFAULT_PROFILE.into(),
         )),
         msg_tx,
     )?;
     // SampledMethod applies the offset itself. The UI must not apply it again.
-    let _ = msg_tx.send(CalibrationMessage::SampledComplete);
-    Ok(())
+    if let Some(method) = next.as_mut() {
+        method.init(data)?;
+    }
+    let _ = msg_tx.send(CalibrationMessage::SampledComplete {
+        continuous: next.is_some(),
+    });
+    Ok(next)
 }
 
 fn handle_recenter<S: MessageSender>(

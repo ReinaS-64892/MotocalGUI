@@ -17,11 +17,12 @@ MotocalGUI uses [libmotoc](https://docs.rs/libmotoc/0.4.0/libmotoc/) for sampled
 ## Features
 
 - **Calibrate** — hold both devices firmly together and slowly move and rotate them in different directions. Audio cues and a progress bar guide you through.
+- **Continuous calibration** — enable the Continuous toggle between Calibrate and Recenter, then press Calibrate for `motoc calibrate --continue` behavior through libmotoc. Keep the two devices fixed together during continuous operation. Turn the toggle off to stop.
 - **Recenter** — face forward and press Recenter. Floor height is preserved.
 - **Reset** — reset the target tracking origin, any tracking origin from the dropdown, or the entire STAGE/LOCAL reference space (position, orientation, and height).
 - **Device identification** — open a dropdown and move a device to see which one it is.
 - **Battery status** — see charge levels for all your tracked devices.
-- **Shared calibration** — libmotoc reads and writes motoc’s default `last` profile at `$XDG_CONFIG_HOME/motoc/last.json` (usually `~/.config/motoc/last.json`). The UI restores it on startup and after reconnecting to the runtime; `motoc continue` loads the same file. Continuous profiles created by the CLI resume through libmotoc until a reset, a new calibration, or closing the UI.
+- **Shared calibration** — libmotoc reads and writes motoc’s default `last` profile at `$XDG_CONFIG_HOME/motoc/last.json` (usually `~/.config/motoc/last.json`). The UI restores it on startup and after reconnecting to the runtime; `motoc continue` loads the same file. Continuous profiles resume through libmotoc until the Continuous toggle is turned off, a reset, a new calibration, or closing the UI.
 
 ## Installation
 

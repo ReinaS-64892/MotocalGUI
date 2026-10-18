@@ -324,6 +324,27 @@ pub fn build_ui(app: &adw::Application) {
     calibrate_btn.set_popover(Some(&sample_popover));
     button_box.append(&calibrate_btn);
 
+    let continuous_btn = gtk4::ToggleButton::with_label("Continuous");
+    continuous_btn.set_tooltip_text(Some(
+        "Enable before Calibrate to keep calibrating continuously; turn off to stop. \
+         Keep both devices fixed together while active.",
+    ));
+    button_box.append(&continuous_btn);
+
+    // Backend state updates must not enqueue another stop command.
+    let syncing_continuous = Rc::new(Cell::new(false));
+    let syncing_for_toggle = Rc::clone(&syncing_continuous);
+    let cmd_tx_continuous = Rc::clone(&cmd_tx);
+    let toasts_continuous = toasts.clone();
+    continuous_btn.connect_toggled(move |btn| {
+        if !syncing_for_toggle.get()
+            && !btn.is_active()
+            && let Err(error) = cmd_tx_continuous.send(CalibrationCommand::StopContinuous)
+        {
+            toasts_continuous.show(&format!("Failed to stop continuous calibration: {error}"));
+        }
+    });
+
     let recenter_btn = Button::with_label("Recenter");
     recenter_btn.set_width_request(90);
     recenter_btn.set_tooltip_text(Some("Set STAGE origin to current HMD position and heading"));
@@ -645,6 +666,7 @@ pub fn build_ui(app: &adw::Application) {
     let cmd_tx_calibrate = Rc::clone(&cmd_tx);
     let window_for_calibrate = window.clone();
     let sample_count_for_calibrate = Rc::clone(&sample_count);
+    let continuous_for_calibrate = continuous_btn.clone();
     calibrate_btn.connect_clicked(move |btn| {
         let s = state_for_calibrate.borrow();
         let (Some(src), Some(tgt)) = (s.selected_source(), s.selected_target()) else {
@@ -661,6 +683,7 @@ pub fn build_ui(app: &adw::Application) {
             source_serial,
             target_serial,
             sample_count: sample_count_for_calibrate.get(),
+            continuous: continuous_for_calibrate.is_active(),
         };
 
         if hide_help {
@@ -814,7 +837,10 @@ pub fn build_ui(app: &adw::Application) {
                     let fraction = f64::from(collected) / f64::from(total);
                     update_progress_fill(&progress_fill_for_msg, &window_for_msg, fraction);
                 }
-                CalibrationMessage::SampledComplete => {
+                CalibrationMessage::SampledComplete { continuous } => {
+                    syncing_continuous.set(true);
+                    continuous_btn.set_active(continuous);
+                    syncing_continuous.set(false);
                     calibrate_btn_for_msg.set_label("Calibrate");
                     calibrate_btn_for_msg.set_sensitive(true);
                     restore_idle_visuals(
@@ -824,7 +850,16 @@ pub fn build_ui(app: &adw::Application) {
                     );
                     play_sound("complete");
 
-                    toasts_for_msg.show("Calibration complete");
+                    toasts_for_msg.show(if continuous {
+                        "Calibration complete; continuous calibration active. Keep devices fixed together."
+                    } else {
+                        "Calibration complete"
+                    });
+                }
+                CalibrationMessage::ContinuousStopped => {
+                    syncing_continuous.set(true);
+                    continuous_btn.set_active(false);
+                    syncing_continuous.set(false);
                 }
                 CalibrationMessage::RecenterComplete => {
                     recenter_btn_for_msg.set_label("Recenter");
@@ -841,6 +876,9 @@ pub fn build_ui(app: &adw::Application) {
                     toasts_for_msg.show(&format!("Reset {label}"));
                 }
                 CalibrationMessage::ProfileRestored { continuous } => {
+                    syncing_continuous.set(true);
+                    continuous_btn.set_active(continuous);
+                    syncing_continuous.set(false);
                     toasts_for_msg.show(if continuous {
                         "Saved calibration restored (continuous mode)"
                     } else {
@@ -858,6 +896,11 @@ pub fn build_ui(app: &adw::Application) {
                     );
                 }
                 CalibrationMessage::RuntimeDisconnected | CalibrationMessage::Error(_) => {
+                    if matches!(msg, CalibrationMessage::RuntimeDisconnected) {
+                        syncing_continuous.set(true);
+                        continuous_btn.set_active(false);
+                        syncing_continuous.set(false);
+                    }
                     calibrate_btn_for_msg.set_label("Calibrate");
                     calibrate_btn_for_msg.set_sensitive(true);
                     recenter_btn_for_msg.set_label("Recenter");
