@@ -67,6 +67,26 @@ fn restore_idle_visuals(background_box: &GtkBox, countdown_label: &Label, progre
     progress_fill.set_size_request(0, -1);
 }
 
+fn update_calibrate_button(
+    button: &adw::SplitButton,
+    continuous_check: &gtk4::CheckButton,
+    continuous_active: bool,
+) {
+    button.set_sensitive(true);
+    continuous_check.set_sensitive(!continuous_active);
+    if continuous_active {
+        button.set_label("Stop Continuous");
+        button.set_tooltip_text(Some("Stop continuous calibration"));
+        button.remove_css_class("suggested-action");
+    } else {
+        button.set_label("Calibrate");
+        button.set_tooltip_text(Some(
+            "Align target tracking to source (dropdown: sample count and continuous mode)",
+        ));
+        button.add_css_class("suggested-action");
+    }
+}
+
 fn update_progress_fill(fill: &GtkBox, window: &adw::ApplicationWindow, fraction: f64) {
     let fill_width = (f64::from(window.width()) * fraction).round() as i32;
     fill.set_size_request(fill_width, -1);
@@ -260,7 +280,7 @@ pub fn build_ui(app: &adw::Application) {
     calibrate_btn.add_css_class("suggested-action");
     calibrate_btn.set_width_request(110);
     calibrate_btn.set_tooltip_text(Some(
-        "Align target tracking to source (dropdown: sample count)",
+        "Align target tracking to source (dropdown: sample count and continuous mode)",
     ));
 
     let sample_count = Rc::new(Cell::new(state.borrow().sample_count()));
@@ -320,30 +340,26 @@ pub fn build_ui(app: &adw::Application) {
         sample_popover_for_list.popdown();
     });
 
-    sample_popover.set_child(Some(&sample_list));
+    let continuous_check = gtk4::CheckButton::with_label("Continuous calibration");
+    continuous_check.set_margin_start(18);
+    continuous_check.set_margin_end(18);
+    continuous_check.set_margin_top(8);
+    continuous_check.set_margin_bottom(12);
+    continuous_check.set_tooltip_text(Some(
+        "Keep calibrating after the initial calibration. \
+         Keep both devices fixed together while active; press Stop Continuous to stop.",
+    ));
+    let calibration_options = GtkBox::new(Orientation::Vertical, 0);
+    calibration_options.append(&sample_list);
+    calibration_options.append(&gtk4::Separator::new(Orientation::Horizontal));
+    calibration_options.append(&continuous_check);
+    sample_popover.set_child(Some(&calibration_options));
     calibrate_btn.set_popover(Some(&sample_popover));
     button_box.append(&calibrate_btn);
 
-    let continuous_btn = gtk4::ToggleButton::with_label("Continuous");
-    continuous_btn.set_tooltip_text(Some(
-        "Enable before Calibrate to keep calibrating continuously; turn off to stop. \
-         Keep both devices fixed together while active.",
-    ));
-    button_box.append(&continuous_btn);
-
-    // Backend state updates must not enqueue another stop command.
-    let syncing_continuous = Rc::new(Cell::new(false));
-    let syncing_for_toggle = Rc::clone(&syncing_continuous);
-    let cmd_tx_continuous = Rc::clone(&cmd_tx);
-    let toasts_continuous = toasts.clone();
-    continuous_btn.connect_toggled(move |btn| {
-        if !syncing_for_toggle.get()
-            && !btn.is_active()
-            && let Err(error) = cmd_tx_continuous.send(CalibrationCommand::StopContinuous)
-        {
-            toasts_continuous.show(&format!("Failed to stop continuous calibration: {error}"));
-        }
-    });
+    // The selected mode and the backend's running state are independent:
+    // stopping leaves the mode selected for the next calibration.
+    let continuous_active = Rc::new(Cell::new(false));
 
     let recenter_btn = Button::with_label("Recenter");
     recenter_btn.set_width_request(90);
@@ -666,8 +682,18 @@ pub fn build_ui(app: &adw::Application) {
     let cmd_tx_calibrate = Rc::clone(&cmd_tx);
     let window_for_calibrate = window.clone();
     let sample_count_for_calibrate = Rc::clone(&sample_count);
-    let continuous_for_calibrate = continuous_btn.clone();
+    let continuous_for_calibrate = continuous_check.clone();
+    let continuous_active_for_calibrate = Rc::clone(&continuous_active);
     calibrate_btn.connect_clicked(move |btn| {
+        if continuous_active_for_calibrate.get() {
+            if let Err(error) = cmd_tx_calibrate.send(CalibrationCommand::StopContinuous) {
+                toasts_for_calibrate.show(&format!("Failed to stop continuous calibration: {error}"));
+                return;
+            }
+            btn.set_label("Stopping...");
+            btn.set_sensitive(false);
+            return;
+        }
         let s = state_for_calibrate.borrow();
         let (Some(src), Some(tgt)) = (s.selected_source(), s.selected_target()) else {
             toasts_for_calibrate.show("Select both source and target devices");
@@ -838,11 +864,12 @@ pub fn build_ui(app: &adw::Application) {
                     update_progress_fill(&progress_fill_for_msg, &window_for_msg, fraction);
                 }
                 CalibrationMessage::SampledComplete { continuous } => {
-                    syncing_continuous.set(true);
-                    continuous_btn.set_active(continuous);
-                    syncing_continuous.set(false);
-                    calibrate_btn_for_msg.set_label("Calibrate");
-                    calibrate_btn_for_msg.set_sensitive(true);
+                    continuous_active.set(continuous);
+                    update_calibrate_button(
+                        &calibrate_btn_for_msg,
+                        &continuous_check,
+                        continuous,
+                    );
                     restore_idle_visuals(
                         &background_box_for_msg,
                         &countdown_label_for_msg,
@@ -857,9 +884,8 @@ pub fn build_ui(app: &adw::Application) {
                     });
                 }
                 CalibrationMessage::ContinuousStopped => {
-                    syncing_continuous.set(true);
-                    continuous_btn.set_active(false);
-                    syncing_continuous.set(false);
+                    continuous_active.set(false);
+                    update_calibrate_button(&calibrate_btn_for_msg, &continuous_check, false);
                 }
                 CalibrationMessage::RecenterComplete => {
                     recenter_btn_for_msg.set_label("Recenter");
@@ -876,9 +902,15 @@ pub fn build_ui(app: &adw::Application) {
                     toasts_for_msg.show(&format!("Reset {label}"));
                 }
                 CalibrationMessage::ProfileRestored { continuous } => {
-                    syncing_continuous.set(true);
-                    continuous_btn.set_active(continuous);
-                    syncing_continuous.set(false);
+                    if continuous {
+                        continuous_check.set_active(true);
+                    }
+                    continuous_active.set(continuous);
+                    update_calibrate_button(
+                        &calibrate_btn_for_msg,
+                        &continuous_check,
+                        continuous,
+                    );
                     toasts_for_msg.show(if continuous {
                         "Saved calibration restored (continuous mode)"
                     } else {
@@ -897,12 +929,13 @@ pub fn build_ui(app: &adw::Application) {
                 }
                 CalibrationMessage::RuntimeDisconnected | CalibrationMessage::Error(_) => {
                     if matches!(msg, CalibrationMessage::RuntimeDisconnected) {
-                        syncing_continuous.set(true);
-                        continuous_btn.set_active(false);
-                        syncing_continuous.set(false);
+                        continuous_active.set(false);
                     }
-                    calibrate_btn_for_msg.set_label("Calibrate");
-                    calibrate_btn_for_msg.set_sensitive(true);
+                    update_calibrate_button(
+                        &calibrate_btn_for_msg,
+                        &continuous_check,
+                        continuous_active.get(),
+                    );
                     recenter_btn_for_msg.set_label("Recenter");
                     recenter_btn_for_msg.set_sensitive(true);
                     restore_idle_visuals(
