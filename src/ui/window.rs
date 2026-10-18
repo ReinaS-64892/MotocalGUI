@@ -48,6 +48,11 @@ fn play_sound(sound_id: &str) {
     let _ = std::process::Command::new("canberra-gtk-play")
         .arg("-i")
         .arg(sound_id)
+        // Keep VR calibration cues separate from desktop notification sounds,
+        // which may be muted automatically during screen capture.
+        .arg("--property=media.role=game")
+        .arg("--property=application.name=MotocalGUI")
+        .arg("--property=application.id=io.github.ReinaS_64892.MotocalGUI")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
