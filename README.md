@@ -16,7 +16,7 @@ MotocalGUI uses [libmotoc](https://docs.rs/libmotoc/0.4.0/libmotoc/) for sampled
 
 ## Features
 
-- **Calibrate** — grip both devices together, sweep a figure-eight, done. Audio cues and a progress bar guide you through.
+- **Calibrate** — hold both devices firmly together and slowly move and rotate them in different directions. Audio cues and a progress bar guide you through.
 - **Recenter** — face forward and press Recenter. Floor height is preserved.
 - **Reset** — reset the target tracking origin, any tracking origin from the dropdown, or the entire STAGE/LOCAL reference space (position, orientation, and height).
 - **Device identification** — open a dropdown and move a device to see which one it is.
@@ -70,7 +70,9 @@ Calibration files are owned entirely by libmotoc, with the same format and profi
 2. Launch MotocalGUI
 3. Select your **source** (reference device) and **target** (device to align)
 4. Grip both devices firmly together and click **Calibrate**
-5. Sweep a wide figure-eight through the air until the chime
+5. Wait for the countdown beeps to finish, then slowly move and rotate both devices together, turning and tilting them in different directions until the progress bar completes or you hear the chime
+
+Keep the devices firmly together from start to finish so they cannot shift or twist relative to each other. Keep both devices tracked, and move slowly and steadily without sudden movements, following [motoc's calibration tips](https://github.com/galister/motoc#calibration-tips). If using a headset, hold the other device firmly against it while moving together.
 
 ## Acknowledgments
 

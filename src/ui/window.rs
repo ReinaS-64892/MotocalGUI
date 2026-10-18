@@ -72,8 +72,6 @@ fn update_progress_fill(fill: &GtkBox, window: &adw::ApplicationWindow, fraction
     fill.set_size_request(fill_width, -1);
 }
 
-const CALIBRATION_MOTION_SVG: &str = include_str!("../../assets/calibration_motion.svg");
-
 fn build_help_dialog(state: &SharedState, calibrate_action: bool) -> adw::AlertDialog {
     let dialog = adw::AlertDialog::builder()
         .heading("Calibration Instructions")
@@ -84,26 +82,18 @@ fn build_help_dialog(state: &SharedState, calibrate_action: bool) -> adw::AlertD
     let instructions = Label::new(None);
     instructions.set_markup(
         "1. Grip both selected devices <b>firmly together</b> \u{2014} they must \
-         not shift relative to each other\n\n\
+         not shift or twist relative to each other from start to finish\n\n\
          2. Wait for the countdown beeps to finish, then \
-         <b>slowly sweep a wide figure-eight</b> (\u{221E}) through the air, \
-         tilting into each curve as shown below\n\n\
-         3. <b>Keep moving</b> until the progress bar completes or you hear \
-         the chime",
+         <b>slowly move and rotate both devices together</b>, turning and \
+         tilting them in different directions\n\n\
+         3. Keep both devices tracked and the motion <b>slow and steady</b>. \
+         Avoid sudden movements and continue until the progress bar completes \
+         or you hear the chime",
     );
     instructions.set_xalign(0.0);
     instructions.set_wrap(true);
     instructions.set_max_width_chars(56);
     extra_box.append(&instructions);
-
-    let svg_bytes = glib::Bytes::from_static(CALIBRATION_MOTION_SVG.as_bytes());
-    if let Ok(texture) = gtk4::gdk::Texture::from_bytes(&svg_bytes) {
-        let picture = gtk4::Picture::for_paintable(&texture);
-        picture.set_can_shrink(true);
-        picture.set_content_fit(gtk4::ContentFit::Contain);
-        picture.set_halign(Align::Center);
-        extra_box.append(&picture);
-    }
 
     let tip = Label::new(Some(
         "Tip: Open a device dropdown and move a device to see which one it is",
