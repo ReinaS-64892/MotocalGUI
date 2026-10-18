@@ -69,32 +69,30 @@ impl XrSession {
         while let Some(event) = self
             .instance
             .poll_event(&mut buffer)
-            .map_err(|e| StepError::Backend(e.to_string()))?
+            .map_err(StepError::from)?
         {
             match event {
                 xr::Event::SessionStateChanged(event) => match event.state() {
                     xr::SessionState::READY => {
                         self.session
                             .begin(xr::ViewConfigurationType::PRIMARY_STEREO)
-                            .map_err(|e| StepError::Backend(e.to_string()))?;
+                            .map_err(StepError::from)?;
                         self.running = true;
                     }
                     xr::SessionState::STOPPING => {
                         self.running = false;
-                        self.session
-                            .end()
-                            .map_err(|e| StepError::Backend(e.to_string()))?;
-                        return Err(StepError::Backend("OpenXR session stopped".into()));
+                        let _ = self.session.end();
+                        return Err(StepError::RuntimeDisconnected);
                     }
                     xr::SessionState::EXITING | xr::SessionState::LOSS_PENDING => {
                         self.running = false;
-                        return Err(StepError::Backend("OpenXR session lost".into()));
+                        return Err(StepError::RuntimeDisconnected);
                     }
                     _ => {}
                 },
                 xr::Event::InstanceLossPending(_) => {
                     self.running = false;
-                    return Err(StepError::Backend("OpenXR runtime lost".into()));
+                    return Err(StepError::RuntimeDisconnected);
                 }
                 _ => {}
             }
@@ -173,15 +171,19 @@ pub fn xr_event_loop<S: MessageSender>(cmd_rx: mpsc::Receiver<CalibrationCommand
         match XrSession::new() {
             Ok(mut session) => {
                 match libmonado::Monado::auto_connect()
-                    .map_err(StepError::Backend)
+                    .map_err(|error| {
+                        eprintln!("Waiting for Monado: {error}");
+                        StepError::RuntimeDisconnected
+                    })
                     .and_then(|monado| {
-                        run_connected(
+                        let result = run_connected(
                             &mut session,
                             &monado,
                             &cmd_rx,
                             &msg_tx,
                             &mut movement_detection_active,
-                        )
+                        );
+                        check_runtime_result(result, &monado)
                     }) {
                     Ok(()) => return,
                     Err(error) => report(&msg_tx, Err(error)),
@@ -221,7 +223,7 @@ fn run_connected<S: MessageSender>(
     let mut continuous = match load_default_profile(&mut data, msg_tx) {
         Ok(method) => method,
         Err(error) => {
-            report(msg_tx, Err(error));
+            report_connected(msg_tx, Err(error), monado)?;
             None
         }
     };
@@ -233,7 +235,7 @@ fn run_connected<S: MessageSender>(
         let command = cmd_rx.recv_timeout(Duration::from_millis(interval));
         session.poll_events()?;
         if !session.running {
-            return Err(StepError::Backend("OpenXR session is not running".into()));
+            return Err(StepError::RuntimeDisconnected);
         }
         match command {
             Ok(CalibrationCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -258,7 +260,7 @@ fn run_connected<S: MessageSender>(
                 sample_count,
             }) => {
                 stop_continuous(&mut continuous, &mut data)?;
-                report(
+                report_connected(
                     msg_tx,
                     handle_start_sampled(
                         Some(session),
@@ -267,10 +269,11 @@ fn run_connected<S: MessageSender>(
                         &target_serial,
                         sample_count,
                     ),
-                );
+                    monado,
+                )?;
             }
             Ok(CalibrationCommand::Recenter) => {
-                report(msg_tx, handle_recenter(Some(session), msg_tx));
+                report_connected(msg_tx, handle_recenter(Some(session), msg_tx), monado)?;
             }
             Ok(CalibrationCommand::Reset { target, label }) => {
                 stop_continuous(&mut continuous, &mut data)?;
@@ -278,10 +281,7 @@ fn run_connected<S: MessageSender>(
             }
         }
         if let Some(method) = continuous.as_mut() {
-            data.now = session
-                .instance
-                .now()
-                .map_err(|e| StepError::Backend(e.to_string()))?;
+            data.now = session.instance.now().map_err(StepError::from)?;
             match method.step(&mut data) {
                 Ok((StepResult::Continue, _)) => {}
                 Ok((StepResult::End, _)) => stop_continuous(&mut continuous, &mut data)?,
@@ -292,7 +292,7 @@ fn run_connected<S: MessageSender>(
                 }
                 Err(error) => {
                     stop_continuous(&mut continuous, &mut data)?;
-                    report(msg_tx, Err(error.into()));
+                    report_connected(msg_tx, Err(error.into()), monado)?;
                 }
             }
         }
@@ -458,6 +458,7 @@ fn process_movement_update<S: MessageSender>(
 
 #[derive(Debug)]
 enum StepError {
+    RuntimeDisconnected,
     NotConnected { action: &'static str },
     Backend(String),
     DeviceNotFound { role: &'static str, serial: String },
@@ -466,6 +467,7 @@ enum StepError {
 impl StepError {
     fn user_message(&self) -> String {
         match self {
+            Self::RuntimeDisconnected => "OpenXR runtime disconnected".into(),
             Self::NotConnected { action } => format!("Connect to Monado to enable {action}"),
             Self::Backend(detail) => format!("Calibration backend: {detail}"),
             Self::DeviceNotFound { role, serial } => {
@@ -477,13 +479,67 @@ impl StepError {
 
 impl From<libmotoc::Error> for StepError {
     fn from(error: libmotoc::Error) -> Self {
-        Self::Backend(error.to_string())
+        let mut cause = &error;
+        while let libmotoc::Error::Context(_, inner) = cause {
+            cause = inner;
+        }
+        if let libmotoc::Error::Xr(code) | libmotoc::Error::HandJointLocation(code) = cause
+            && matches!(Self::from(*code), Self::RuntimeDisconnected)
+        {
+            Self::RuntimeDisconnected
+        } else {
+            Self::Backend(error.to_string())
+        }
+    }
+}
+
+impl From<xr::sys::Result> for StepError {
+    fn from(error: xr::sys::Result) -> Self {
+        match error {
+            xr::sys::Result::ERROR_INSTANCE_LOST | xr::sys::Result::ERROR_SESSION_LOST => {
+                Self::RuntimeDisconnected
+            }
+            error => Self::Backend(error.to_string()),
+        }
+    }
+}
+
+fn check_runtime_result<T>(
+    result: Result<T, StepError>,
+    monado: &libmonado::Monado,
+) -> Result<T, StepError> {
+    result.map_err(|error| {
+        if monado.clients().is_ok() {
+            error
+        } else {
+            StepError::RuntimeDisconnected
+        }
+    })
+}
+
+fn report_connected<S: MessageSender>(
+    msg_tx: &S,
+    result: Result<(), StepError>,
+    monado: &libmonado::Monado,
+) -> Result<(), StepError> {
+    match check_runtime_result(result, monado) {
+        Err(StepError::RuntimeDisconnected) => Err(StepError::RuntimeDisconnected),
+        result => {
+            report(msg_tx, result);
+            Ok(())
+        }
     }
 }
 
 fn report<S: MessageSender>(msg_tx: &S, result: Result<(), StepError>) {
-    if let Err(e) = result {
-        let _ = msg_tx.send(CalibrationMessage::Error(e.user_message()));
+    match result {
+        Err(StepError::RuntimeDisconnected) => {
+            let _ = msg_tx.send(CalibrationMessage::RuntimeDisconnected);
+        }
+        Err(error) => {
+            let _ = msg_tx.send(CalibrationMessage::Error(error.user_message()));
+        }
+        Ok(()) => {}
     }
 }
 
@@ -499,12 +555,8 @@ fn load_calibrator_data<'a>(
     session: &xr::Session<xr::headless::Headless>,
     monado: &'a libmonado::Monado,
 ) -> Result<CalibratorData<'a>, StepError> {
-    let list = session
-        .get_xdev_list()
-        .map_err(|e| StepError::Backend(e.to_string()))?;
-    let xdevs = list
-        .enumerate_xdevs()
-        .map_err(|e| StepError::Backend(e.to_string()))?;
+    let list = session.get_xdev_list().map_err(StepError::from)?;
+    let xdevs = list.enumerate_xdevs().map_err(StepError::from)?;
     let mut devices = Vec::new();
     for inner in monado
         .devices()
@@ -525,7 +577,7 @@ fn load_calibrator_data<'a>(
                 serial,
                 space: xdev
                     .create_space(xr::Posef::IDENTITY)
-                    .map_err(|e| StepError::Backend(e.to_string()))?,
+                    .map_err(StepError::from)?,
                 inner,
             });
         }
@@ -541,10 +593,7 @@ fn load_calibrator_data<'a>(
         stage: create_reference_space(session, xr::ReferenceSpaceType::STAGE)?,
         local: create_reference_space(session, xr::ReferenceSpaceType::LOCAL)?,
         view: create_reference_space(session, xr::ReferenceSpaceType::VIEW)?,
-        now: session
-            .instance()
-            .now()
-            .map_err(|e| StepError::Backend(e.to_string()))?,
+        now: session.instance().now().map_err(StepError::from)?,
     })
 }
 
@@ -554,7 +603,7 @@ fn create_reference_space(
 ) -> Result<xr::Space, StepError> {
     session
         .create_reference_space(kind, xr::Posef::IDENTITY)
-        .map_err(|e| StepError::Backend(e.to_string()))
+        .map_err(StepError::from)
 }
 
 fn run_calibrator<S: MessageSender>(
@@ -584,10 +633,7 @@ fn run_calibrator<S: MessageSender>(
                 ));
             }
             session.poll_events()?;
-            data.now = session
-                .instance
-                .now()
-                .map_err(|e| StepError::Backend(e.to_string()))?;
+            data.now = session.instance.now().map_err(StepError::from)?;
             let (next_step, status) = method.step(data)?;
             if let Some(CalibratorStatus::Progress { current, max, .. }) = status {
                 let _ = msg_tx.send(CalibrationMessage::Progress {
@@ -677,6 +723,47 @@ fn handle_recenter<S: MessageSender>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_loss_reports_a_silent_disconnect_each_time() {
+        let (tx, rx) = mpsc::channel();
+        for code in [
+            xr::sys::Result::ERROR_INSTANCE_LOST,
+            xr::sys::Result::ERROR_SESSION_LOST,
+            xr::sys::Result::ERROR_INSTANCE_LOST,
+        ] {
+            report(&tx, Err(code.into()));
+            assert!(matches!(
+                rx.try_recv(),
+                Ok(CalibrationMessage::RuntimeDisconnected)
+            ));
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn contextual_libmotoc_runtime_loss_is_also_a_disconnect() {
+        let error = libmotoc::Error::Context(
+            "sampling".into(),
+            Box::new(libmotoc::Error::Context(
+                "locating device".into(),
+                Box::new(libmotoc::Error::Xr(xr::sys::Result::ERROR_SESSION_LOST)),
+            )),
+        );
+        assert!(matches!(
+            StepError::from(error),
+            StepError::RuntimeDisconnected
+        ));
+    }
+
+    #[test]
+    fn other_backend_errors_still_notify() {
+        let (tx, rx) = mpsc::channel();
+        report(&tx, Err(xr::sys::Result::ERROR_VALIDATION_FAILURE.into()));
+        assert!(matches!(rx.try_recv(), Ok(CalibrationMessage::Error(_))));
+        report(&tx, Ok(()));
+        assert!(rx.try_recv().is_err());
+    }
 
     #[test]
     fn only_missing_profiles_are_ignored() {

@@ -31,5 +31,6 @@ pub enum CalibrationMessage {
     ResetComplete(String),
     ProfileRestored { continuous: bool },
     MovementUpdate { movements: Vec<DeviceMovement> },
+    RuntimeDisconnected,
     Error(String),
 }

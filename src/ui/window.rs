@@ -867,7 +867,7 @@ pub fn build_ui(app: &adw::Application) {
                         &target_list_for_msg,
                     );
                 }
-                CalibrationMessage::Error(e) => {
+                CalibrationMessage::RuntimeDisconnected | CalibrationMessage::Error(_) => {
                     calibrate_btn_for_msg.set_label("Calibrate");
                     calibrate_btn_for_msg.set_sensitive(true);
                     recenter_btn_for_msg.set_label("Recenter");
@@ -877,8 +877,9 @@ pub fn build_ui(app: &adw::Application) {
                         &countdown_label_for_msg,
                         &progress_fill_for_msg,
                     );
-                    play_sound("complete");
-                    toasts_for_msg.show(&format!("Error: {e}"));
+                    if let CalibrationMessage::Error(error) = msg {
+                        toasts_for_msg.show(&format!("Error: {error}"));
+                    }
                 }
             }
         }
