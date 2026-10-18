@@ -75,16 +75,9 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         let config = Config::load();
-        let connection = monado::try_connect();
-        let categories = if connection.is_some() {
-            monado::enumerate_devices()
-        } else {
-            Vec::new()
-        };
-
         let mut state = Self {
-            connection,
-            categories,
+            connection: None,
+            categories: Vec::new(),
             source_id: if config.source.is_empty() { None } else { Some(config.source) },
             target_id: if config.target.is_empty() { None } else { Some(config.target) },
             movement_intensities: HashMap::new(),
@@ -92,7 +85,7 @@ impl AppState {
             hide_calibration_help: config.hide_calibration_help,
             sample_count: config.sample_count,
         };
-        state.update_known_battery_devices();
+        state.refresh_connection();
         state
     }
 
@@ -172,32 +165,33 @@ impl AppState {
 
     pub fn refresh_connection(&mut self) -> bool {
         let was_connected = self.is_connected();
-        if !was_connected {
-            self.connection = monado::try_connect();
-        }
+        monado::refresh_connection(
+            &mut self.connection,
+            monado::try_connect,
+            MonadoConnection::is_alive,
+        );
 
-        let is_connected = self.is_connected();
-        if is_connected && !was_connected {
+        if self.is_connected() && !was_connected {
             // Just connected
             if let Some(ref conn) = self.connection {
-                self.categories = conn.enumerate_devices().unwrap_or_default();
+                match conn.enumerate_devices() {
+                    Ok(categories) => self.categories = categories,
+                    Err(_) => self.connection = None,
+                }
             }
-            self.update_known_battery_devices();
-        } else if !is_connected {
-            self.categories.clear();
         }
+        if !self.is_connected() {
+            self.categories.clear();
+            self.movement_intensities.clear();
+        }
+        self.update_known_battery_devices();
 
-        was_connected != is_connected
+        was_connected != self.is_connected()
     }
 
     pub fn force_refresh(&mut self) {
-        self.connection = monado::try_connect();
-        if let Some(ref conn) = self.connection {
-            self.categories = conn.enumerate_devices().unwrap_or_default();
-        } else {
-            self.categories.clear();
-        }
-        self.update_known_battery_devices();
+        self.connection = None;
+        self.refresh_connection();
     }
 
     pub fn refresh_batteries(&mut self) {

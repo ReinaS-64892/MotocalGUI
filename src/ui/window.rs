@@ -555,40 +555,33 @@ pub fn build_ui(app: &adw::Application) {
         status_label: Label,
         battery_bar: GtkBox,
         window_focused: Rc<Cell<bool>>,
+        mut last_battery_refresh: std::time::Instant,
     ) {
-        let is_connected = state.borrow().is_connected();
         let focused = window_focused.get();
-        let interval_ms = if is_connected {
-            if focused { 5000 } else { 30_000 }
-        } else {
-            if focused { 500 } else { 3000 }
-        };
+        let interval_ms = if focused { 500 } else { 3000 };
 
         glib::timeout_add_local_once(std::time::Duration::from_millis(interval_ms), move || {
-            if state.borrow().is_connected() {
+            let was_connected = state.borrow().is_connected();
+            let changed = state.borrow_mut().refresh_connection();
+            let battery_interval = std::time::Duration::from_secs(
+                if window_focused.get() { 5 } else { 30 },
+            );
+            if state.borrow().is_connected()
+                && (changed || last_battery_refresh.elapsed() >= battery_interval)
+            {
                 state.borrow_mut().refresh_batteries();
+                last_battery_refresh = std::time::Instant::now();
+            }
+            if was_connected == state.borrow().is_connected() {
                 update_battery_bar(&battery_bar, &state.borrow());
-
-                if !state.borrow().is_connected() {
-                    update_ui_from_state(
-                        &state,
-                        &source_list,
-                        &target_list,
-                        &status_label,
-                        &battery_bar,
-                    );
-                }
             } else {
-                let changed = state.borrow_mut().refresh_connection();
-                if changed {
-                    update_ui_from_state(
-                        &state,
-                        &source_list,
-                        &target_list,
-                        &status_label,
-                        &battery_bar,
-                    );
-                }
+                update_ui_from_state(
+                    &state,
+                    &source_list,
+                    &target_list,
+                    &status_label,
+                    &battery_bar,
+                );
             }
 
             schedule_poll(
@@ -598,6 +591,7 @@ pub fn build_ui(app: &adw::Application) {
                 status_label,
                 battery_bar,
                 window_focused,
+                last_battery_refresh,
             );
         });
     }
@@ -609,6 +603,7 @@ pub fn build_ui(app: &adw::Application) {
         status_for_monitor,
         battery_bar_for_monitor,
         window_focused,
+        std::time::Instant::now(),
     );
 
     let open_popovers = Rc::new(std::cell::RefCell::new(0u32));

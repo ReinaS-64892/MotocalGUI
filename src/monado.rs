@@ -24,6 +24,12 @@ impl MonadoConnection {
         }
     }
 
+    pub fn is_alive(&self) -> bool {
+        // Device metadata is read from shared memory and can outlive the server.
+        // Updating the client list makes an IPC request on this connection.
+        self.monado.clients().is_ok()
+    }
+
     pub fn enumerate_devices(&self) -> Result<Vec<Category>, MonadoError> {
         let origins: Vec<_> = self
             .monado
@@ -151,15 +157,78 @@ pub fn try_connect() -> Option<MonadoConnection> {
     MonadoConnection::connect().ok()
 }
 
-pub fn enumerate_devices() -> Vec<Category> {
-    try_connect().map_or_else(Vec::new, |conn| {
-        conn.enumerate_devices().unwrap_or_default()
-    })
+pub(crate) fn refresh_connection<C>(
+    connection: &mut Option<C>,
+    connect: impl FnOnce() -> Option<C>,
+    is_alive: impl FnOnce(&C) -> bool,
+) -> bool {
+    let was_connected = connection.is_some();
+    if connection.is_none() {
+        *connection = connect();
+    }
+    if connection.as_ref().is_some_and(|conn| !is_alive(conn)) {
+        // Retry on the next poll so the disconnected state is also propagated.
+        *connection = None;
+    }
+    was_connected != connection.is_some()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn connection_tracks_repeated_server_restarts() {
+        let server_generation = Cell::new(None);
+        let connect_attempts = Cell::new(0);
+        let mut connection = None;
+        let poll = |connection: &mut Option<u32>| {
+            refresh_connection(
+                connection,
+                || {
+                    connect_attempts.set(connect_attempts.get() + 1);
+                    server_generation.get()
+                },
+                |generation| Some(*generation) == server_generation.get(),
+            )
+        };
+
+        assert!(!poll(&mut connection));
+        assert!(connection.is_none());
+        for generation in 1..=4 {
+            server_generation.set(Some(generation));
+            assert!(poll(&mut connection));
+            assert_eq!(connection, Some(generation));
+            let attempts = connect_attempts.get();
+            assert!(!poll(&mut connection));
+            assert_eq!(connect_attempts.get(), attempts);
+
+            server_generation.set(None);
+            assert!(poll(&mut connection));
+            assert!(connection.is_none());
+            assert!(!poll(&mut connection));
+            assert!(connection.is_none());
+        }
+
+        // A restart between polls must also invalidate the old connection.
+        server_generation.set(Some(5));
+        assert!(poll(&mut connection));
+        server_generation.set(Some(6));
+        assert!(poll(&mut connection));
+        assert!(connection.is_none());
+        assert!(poll(&mut connection));
+        assert_eq!(connection, Some(6));
+    }
+
+    #[test]
+    fn connection_lost_during_connect_stays_disconnected() {
+        let mut connection = None;
+        assert!(!refresh_connection(&mut connection, || Some(()), |()| false));
+        assert!(connection.is_none());
+        assert!(refresh_connection(&mut connection, || Some(()), |()| true));
+        assert!(connection.is_some());
+    }
 
     #[test]
     fn test_connect() {
