@@ -20,7 +20,7 @@ use crate::xr::xr_event_loop;
 
 // Dismisses previous toast before showing a new one.
 #[derive(Clone)]
-struct ToastManager {
+pub(super) struct ToastManager {
     overlay: adw::ToastOverlay,
     current_toast: Rc<RefCell<Option<adw::Toast>>>,
 }
@@ -33,7 +33,7 @@ impl ToastManager {
         }
     }
 
-    fn show(&self, message: &str) {
+    pub(super) fn show(&self, message: &str) {
         if let Some(prev) = self.current_toast.borrow_mut().take() {
             prev.dismiss();
         }
@@ -90,6 +90,28 @@ fn update_calibrate_button(
 fn update_progress_fill(fill: &GtkBox, window: &adw::ApplicationWindow, fraction: f64) {
     let fill_width = (f64::from(window.width()) * fraction).round() as i32;
     fill.set_size_request(fill_width, -1);
+}
+
+fn update_adjustment_button(
+    adjustment: &super::adjustment::AdjustmentEditor,
+    calibrate: &adw::SplitButton,
+    recenter: &Button,
+    continuous: bool,
+) {
+    adjustment
+        .button
+        .set_sensitive(if adjustment.widget.is_visible() {
+            !adjustment.is_saving()
+        } else {
+            !continuous && calibrate.is_sensitive() && recenter.is_sensitive()
+        });
+    if !adjustment.widget.is_visible() {
+        adjustment.button.set_tooltip_text(Some(if continuous {
+            "Adjust is unavailable for continuous calibration; run a normal calibration to enable it"
+        } else {
+            "Fine-tune the selected Target tracking origin"
+        }));
+    }
 }
 
 fn build_help_dialog(state: &SharedState, calibrate_action: bool) -> adw::AlertDialog {
@@ -367,6 +389,12 @@ pub fn build_ui(app: &adw::Application) {
     // The selected mode and the backend's running state are independent:
     // stopping leaves the mode selected for the next calibration.
     let continuous_active = Rc::new(Cell::new(false));
+    // A stopped continuous calibration still has a device-based saved profile.
+    let continuous_profile = Rc::new(Cell::new(false));
+
+    let adjustment = super::adjustment::AdjustmentEditor::new(&cmd_tx, &toasts);
+    button_box.append(&adjustment.button);
+    main_box.append(&adjustment.widget);
 
     let recenter_btn = Button::with_label("Recenter");
     recenter_btn.set_width_request(90);
@@ -386,6 +414,85 @@ pub fn build_ui(app: &adw::Application) {
     reset_popover.set_child(Some(&reset_list));
     reset_btn.set_popover(Some(&reset_popover));
     button_box.append(&reset_btn);
+
+    let adjustment_for_click = adjustment.clone();
+    let state_for_adjust = Rc::clone(&state);
+    let cmd_tx_adjust = Rc::clone(&cmd_tx);
+    let toasts_for_adjust = toasts.clone();
+    let calibrate_for_adjust = calibrate_btn.clone();
+    let recenter_for_adjust = recenter_btn.clone();
+    let reset_for_adjust = reset_btn.clone();
+    let refresh_for_adjust = refresh_btn.clone();
+    let source_for_adjust = source_list.widget().clone();
+    let target_for_adjust = target_list.widget().clone();
+    let mode_for_adjust = continuous_check.clone();
+    let profile_for_adjust = Rc::clone(&continuous_profile);
+    let active_for_adjust = Rc::clone(&continuous_active);
+    adjustment.button.connect_clicked(move |_| {
+        let editing = !adjustment_for_click.widget.is_visible();
+        if editing {
+            if mode_for_adjust.is_active() || profile_for_adjust.get() || active_for_adjust.get() {
+                return;
+            }
+            if !state_for_adjust.borrow().is_connected() {
+                toasts_for_adjust.show("Connect to Monado to adjust offsets");
+                return;
+            }
+            if !adjustment_for_click.open(&state_for_adjust, &cmd_tx_adjust, &toasts_for_adjust) {
+                return;
+            }
+        } else {
+            adjustment_for_click.close();
+        }
+        calibrate_for_adjust.set_sensitive(!editing);
+        recenter_for_adjust.set_sensitive(!editing);
+        reset_for_adjust.set_sensitive(!editing);
+        refresh_for_adjust.set_sensitive(!editing);
+        source_for_adjust.set_sensitive(!editing);
+        target_for_adjust.set_sensitive(!editing);
+    });
+
+    // Block entering the editor while calibration or recentering is pending.
+    for operation in [
+        calibrate_btn.clone().upcast::<gtk4::Widget>(),
+        recenter_btn.clone().upcast(),
+    ] {
+        let adjustment = adjustment.clone();
+        let calibrate = calibrate_btn.clone();
+        let recenter = recenter_btn.clone();
+        let check = continuous_check.clone();
+        let profile = Rc::clone(&continuous_profile);
+        let active = Rc::clone(&continuous_active);
+        operation.connect_sensitive_notify(move |_| {
+            update_adjustment_button(
+                &adjustment,
+                &calibrate,
+                &recenter,
+                check.is_active() || profile.get() || active.get(),
+            );
+        });
+    }
+    {
+        let adjustment = adjustment.clone();
+        let calibrate = calibrate_btn.clone();
+        let recenter = recenter_btn.clone();
+        let profile = Rc::clone(&continuous_profile);
+        let active = Rc::clone(&continuous_active);
+        continuous_check.connect_toggled(move |check| {
+            update_adjustment_button(
+                &adjustment,
+                &calibrate,
+                &recenter,
+                check.is_active() || profile.get() || active.get(),
+            );
+        });
+    }
+    update_adjustment_button(
+        &adjustment,
+        &calibrate_btn,
+        &recenter_btn,
+        continuous_check.is_active(),
+    );
 
     let status_label = Label::new(None);
     status_label.set_halign(Align::Center);
@@ -597,9 +704,8 @@ pub fn build_ui(app: &adw::Application) {
         glib::timeout_add_local_once(std::time::Duration::from_millis(interval_ms), move || {
             let was_connected = state.borrow().is_connected();
             let changed = state.borrow_mut().refresh_connection();
-            let battery_interval = std::time::Duration::from_secs(
-                if window_focused.get() { 5 } else { 30 },
-            );
+            let battery_interval =
+                std::time::Duration::from_secs(if window_focused.get() { 5 } else { 30 });
             if state.borrow().is_connected()
                 && (changed || last_battery_refresh.elapsed() >= battery_interval)
             {
@@ -694,7 +800,8 @@ pub fn build_ui(app: &adw::Application) {
     calibrate_btn.connect_clicked(move |btn| {
         if continuous_active_for_calibrate.get() {
             if let Err(error) = cmd_tx_calibrate.send(CalibrationCommand::StopContinuous) {
-                toasts_for_calibrate.show(&format!("Failed to stop continuous calibration: {error}"));
+                toasts_for_calibrate
+                    .show(&format!("Failed to stop continuous calibration: {error}"));
                 return;
             }
             btn.set_label("Stopping...");
@@ -871,12 +978,9 @@ pub fn build_ui(app: &adw::Application) {
                     update_progress_fill(&progress_fill_for_msg, &window_for_msg, fraction);
                 }
                 CalibrationMessage::SampledComplete { continuous } => {
+                    continuous_profile.set(continuous);
                     continuous_active.set(continuous);
-                    update_calibrate_button(
-                        &calibrate_btn_for_msg,
-                        &continuous_check,
-                        continuous,
-                    );
+                    update_calibrate_button(&calibrate_btn_for_msg, &continuous_check, continuous);
                     restore_idle_visuals(
                         &background_box_for_msg,
                         &countdown_label_for_msg,
@@ -894,6 +998,22 @@ pub fn build_ui(app: &adw::Application) {
                     continuous_active.set(false);
                     update_calibrate_button(&calibrate_btn_for_msg, &continuous_check, false);
                 }
+                CalibrationMessage::AdjustmentUpdated { target, values } => {
+                    adjustment.update(target, values);
+                }
+                CalibrationMessage::AdjustmentAvailability { continuous } => {
+                    continuous_profile.set(continuous);
+                }
+                CalibrationMessage::AdjustmentSaved => {
+                    adjustment.save_finished();
+                    toasts_for_msg.show(
+                        "Adjustment saved to last; available on next launch and motoc continue",
+                    );
+                }
+                CalibrationMessage::AdjustmentSaveFailed(error) => {
+                    adjustment.save_finished();
+                    toasts_for_msg.show(&format!("Failed to save adjustment: {error}"));
+                }
                 CalibrationMessage::RecenterComplete => {
                     recenter_btn_for_msg.set_label("Recenter");
                     recenter_btn_for_msg.set_sensitive(true);
@@ -910,11 +1030,7 @@ pub fn build_ui(app: &adw::Application) {
                 }
                 CalibrationMessage::ProfileRestored { continuous } => {
                     continuous_active.set(continuous);
-                    update_calibrate_button(
-                        &calibrate_btn_for_msg,
-                        &continuous_check,
-                        continuous,
-                    );
+                    update_calibrate_button(&calibrate_btn_for_msg, &continuous_check, continuous);
                     toasts_for_msg.show(if continuous {
                         "Saved calibration restored (continuous mode)"
                     } else {
@@ -934,6 +1050,11 @@ pub fn build_ui(app: &adw::Application) {
                 CalibrationMessage::RuntimeDisconnected | CalibrationMessage::Error(_) => {
                     if matches!(msg, CalibrationMessage::RuntimeDisconnected) {
                         continuous_active.set(false);
+                        adjustment.close();
+                        reset_btn.set_sensitive(true);
+                        refresh_btn.set_sensitive(true);
+                        source_list_for_msg.widget().set_sensitive(true);
+                        target_list_for_msg.widget().set_sensitive(true);
                     }
                     update_calibrate_button(
                         &calibrate_btn_for_msg,
@@ -952,6 +1073,16 @@ pub fn build_ui(app: &adw::Application) {
                     }
                 }
             }
+            if adjustment.widget.is_visible() {
+                calibrate_btn_for_msg.set_sensitive(false);
+                recenter_btn_for_msg.set_sensitive(false);
+            }
+            update_adjustment_button(
+                &adjustment,
+                &calibrate_btn_for_msg,
+                &recenter_btn_for_msg,
+                continuous_check.is_active() || continuous_profile.get() || continuous_active.get(),
+            );
         }
     });
 
