@@ -25,6 +25,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 libmonado = "1.6"
 libmotoc = "0.4.0"
+nalgebra = "0.34"
 openxr_mndx_xdev_space = "0.2.0"
 openxr = { version = "0.21", default-features = false, features = ["linked", "mint"] }
 thiserror = "2"

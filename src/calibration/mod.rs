@@ -11,6 +11,17 @@ pub enum CalibrationCommand {
         label: String,
     },
     StopContinuous,
+    ReadAdjustment {
+        target: crate::monado::ResetTarget,
+    },
+    Adjust {
+        target: crate::monado::ResetTarget,
+        axis: usize,
+        delta: f64,
+    },
+    SaveAdjustment {
+        target: crate::monado::ResetTarget,
+    },
     Recenter,
     StartMovementDetection,
     StopMovementDetection,
@@ -25,15 +36,37 @@ pub struct DeviceMovement {
 
 #[derive(Debug, Clone)]
 pub enum CalibrationMessage {
-    Countdown { seconds: u32 },
-    RecenterCountdown { seconds: u32 },
-    Progress { collected: u32, total: u32 },
-    SampledComplete { continuous: bool },
+    Countdown {
+        seconds: u32,
+    },
+    RecenterCountdown {
+        seconds: u32,
+    },
+    Progress {
+        collected: u32,
+        total: u32,
+    },
+    SampledComplete {
+        continuous: bool,
+    },
     ContinuousStopped,
+    AdjustmentUpdated {
+        target: crate::monado::ResetTarget,
+        values: [f64; 6],
+    },
+    AdjustmentSaved,
+    AdjustmentAvailability {
+        continuous: bool,
+    },
+    AdjustmentSaveFailed(String),
     RecenterComplete,
     ResetComplete(String),
-    ProfileRestored { continuous: bool },
-    MovementUpdate { movements: Vec<DeviceMovement> },
+    ProfileRestored {
+        continuous: bool,
+    },
+    MovementUpdate {
+        movements: Vec<DeviceMovement>,
+    },
     RuntimeDisconnected,
     Error(String),
 }

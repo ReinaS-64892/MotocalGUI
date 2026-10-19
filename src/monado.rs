@@ -2,7 +2,7 @@ use crate::error::MonadoError;
 use crate::ui::{Category, Device};
 use libmonado::{DeviceLogic, MndProperty, Monado};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResetTarget {
     TrackingOrigin(u32),
     Stage,
@@ -10,7 +10,8 @@ pub enum ResetTarget {
 }
 
 // Direct offset writes here are restricted to explicit resets, following motoc CLI.
-// Restoring saved tracking-origin offsets is the other explicit exception in xr.
+// Saved-offset restoration and the explicitly requested motoc tui Adjust UI
+// are the other direct-write paths in xr.
 // Calibration and recentering writes belong to libmotoc calibrators in xr.
 pub struct MonadoConnection {
     monado: Monado,

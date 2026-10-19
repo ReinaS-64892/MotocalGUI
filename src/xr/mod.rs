@@ -1,5 +1,7 @@
 use crate::calibration::{CalibrationCommand, CalibrationMessage, DeviceMovement};
+mod adjustment;
 use crate::error::XrError;
+use adjustment::{check_adjustment_profile, handle_adjustment, save_adjustment};
 use libmonado::DeviceLogic;
 use libmotoc::{
     Calibrator, CalibratorData, CalibratorStatus, EffectiveSpaceVelocity, OffsetMethod, OffsetType,
@@ -285,8 +287,43 @@ fn run_connected<S: MessageSender>(
                 stop_continuous(&mut continuous, &mut data)?;
                 let _ = msg_tx.send(CalibrationMessage::ContinuousStopped);
             }
+            Ok(CalibrationCommand::ReadAdjustment { target }) => {
+                if let Err(error) = check_adjustment_profile(&data) {
+                    report_connected(msg_tx, Err(error), monado)?;
+                    continue;
+                }
+                stop_continuous(&mut continuous, &mut data)?;
+                let _ = msg_tx.send(CalibrationMessage::ContinuousStopped);
+                report_connected(
+                    msg_tx,
+                    handle_adjustment(&data, target, None, msg_tx),
+                    monado,
+                )?;
+            }
+            Ok(CalibrationCommand::Adjust {
+                target,
+                axis,
+                delta,
+            }) => {
+                report_connected(
+                    msg_tx,
+                    handle_adjustment(&data, target, Some((axis, delta)), msg_tx),
+                    monado,
+                )?;
+            }
             Ok(CalibrationCommand::Recenter) => {
                 report_connected(msg_tx, handle_recenter(Some(session), msg_tx), monado)?;
+            }
+            Ok(CalibrationCommand::SaveAdjustment { target }) => {
+                let result = check_runtime_result(save_adjustment(&data, target), monado);
+                let message = match result {
+                    Ok(()) => CalibrationMessage::AdjustmentSaved,
+                    Err(StepError::RuntimeDisconnected) => {
+                        return Err(StepError::RuntimeDisconnected);
+                    }
+                    Err(error) => CalibrationMessage::AdjustmentSaveFailed(error.user_message()),
+                };
+                let _ = msg_tx.send(message);
             }
             Ok(CalibrationCommand::Reset { target, label }) => {
                 stop_continuous(&mut continuous, &mut data)?;
@@ -353,8 +390,12 @@ fn load_default_profile<S: MessageSender>(
     msg_tx: &S,
 ) -> Result<Option<Box<dyn Calibrator>>, StepError> {
     let Some(saved) = optional_profile(data.load_calibration(DEFAULT_PROFILE))? else {
+        let _ = msg_tx.send(CalibrationMessage::AdjustmentAvailability { continuous: false });
         return Ok(None);
     };
+    let _ = msg_tx.send(CalibrationMessage::AdjustmentAvailability {
+        continuous: matches!(saved.offset_type, OffsetType::Device),
+    });
     let method = match saved.offset_type {
         OffsetType::TrackingOrigin => {
             // This is the same restore path as `motoc continue`. libmotoc owns

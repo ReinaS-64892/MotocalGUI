@@ -846,6 +846,7 @@ dependencies = [
  "libadwaita",
  "libmonado",
  "libmotoc",
+ "nalgebra",
  "openxr",
  "openxr_mndx_xdev_space",
  "serde",
