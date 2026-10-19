@@ -51,9 +51,9 @@ impl AdjustmentEditor {
         .enumerate()
         {
             let deltas = if axis < 3 {
-                [-0.1, -0.01, -0.001, 0.001, 0.01, 0.1]
+                [-0.1, -0.01, -0.005, 0.005, 0.01, 0.1]
             } else {
-                [-1.0, -0.1, -0.01, 0.01, 0.1, 1.0]
+                [-1.0, -0.1, -0.05, 0.05, 0.1, 1.0]
             };
             let row = i32::try_from(axis).unwrap();
             // Add roughly a quarter of a button's height between XYZ and PYR.
