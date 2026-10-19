@@ -39,7 +39,6 @@ impl AdjustmentEditor {
         controls.set_column_spacing(6);
         let target = Rc::new(Cell::new(None));
         let mut values = Vec::new();
-        let deltas = [-10.0, -1.0, -0.1, -0.01, 0.01, 0.1, 1.0, 10.0];
         for (axis, name) in [
             "X (m)",
             "Y (m)",
@@ -51,18 +50,28 @@ impl AdjustmentEditor {
         .into_iter()
         .enumerate()
         {
+            let deltas = if axis < 3 {
+                [-0.1, -0.01, -0.001, 0.001, 0.01, 0.1]
+            } else {
+                [-1.0, -0.1, -0.01, 0.01, 0.1, 1.0]
+            };
             let row = i32::try_from(axis).unwrap();
+            // Add roughly a quarter of a button's height between XYZ and PYR.
+            let group_gap = if axis == 3 { 8 } else { 0 };
             let label = Label::new(Some(name));
             label.set_xalign(0.0);
+            label.set_margin_top(group_gap);
             controls.attach(&label, 0, row, 1, 1);
             let value = Label::new(Some("—"));
             value.set_width_chars(10);
             value.set_xalign(1.0);
             value.add_css_class("monospace");
+            value.set_margin_top(group_gap);
             controls.attach(&value, 1, row, 1, 1);
             values.push(value);
             for (index, delta) in deltas.into_iter().enumerate() {
                 let button = Button::with_label(&format!("{delta:+}"));
+                button.set_margin_top(group_gap);
                 button.set_tooltip_text(Some(&format!("{name}: {delta:+}")));
                 controls.attach(&button, i32::try_from(index).unwrap() + 2, row, 1, 1);
                 let cmd_tx = Rc::clone(cmd_tx);
